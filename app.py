@@ -13,6 +13,7 @@ from examagent.ui import (
     chat,
     dashboard,
     knowledge_map,
+    learning_path,
     materials as materials_ui,
     mock,
     progress_page,
@@ -27,6 +28,7 @@ log = get_logger(__name__)
 
 PAGES = {
     "Dashboard": dashboard.render,
+    "Learning Path": learning_path.render,
     "Study": study.render,
     "Quiz": quiz.render,
     "Mock Exam": mock.render,
@@ -39,9 +41,9 @@ PAGES = {
 }
 
 PAGE_ICONS = {
-    "Dashboard": "🎯", "Study": "📖", "Quiz": "✍️", "Mock Exam": "⏱️", "Chat": "💬",
-    "Weaknesses": "🔴", "Knowledge Map": "🗺️", "Progress": "📈",
-    "Materials": "📚", "Settings": "⚙️",
+    "Dashboard": "🎯", "Learning Path": "🧭", "Study": "📖", "Quiz": "✍️",
+    "Mock Exam": "⏱️", "Chat": "💬", "Weaknesses": "🔴", "Knowledge Map": "🗺️",
+    "Progress": "📈", "Materials": "📚", "Settings": "⚙️",
 }
 
 
@@ -193,15 +195,12 @@ def first_run_gate() -> bool:
 
     st.divider()
     st.markdown("### 3. Start")
-    nxt = planner.next_topic()
-    if nxt:
-        st.markdown(f"Recommended first session: **{nxt['topic']}** — {nxt['reason']}")
+    st.caption("The Learning Path walks every topic in order — learn it, answer three "
+               "questions, move on. No mode to pick.")
     c1, c2 = st.columns(2)
-    if c1.button("Start my first session", type="primary", use_container_width=True):
+    if c1.button("Start the Learning Path", type="primary", use_container_width=True):
         progress.mark_first_run_complete()
-        st.session_state["nav_target"] = "Study"
-        if nxt:
-            st.session_state["nav_payload"] = {"topic_id": nxt["topic_id"]}
+        st.session_state["nav_target"] = "Learning Path"
         st.rerun()
     if c2.button("Skip to the dashboard", use_container_width=True):
         progress.mark_first_run_complete()
@@ -235,7 +234,7 @@ def main() -> None:
 
             st.code(traceback.format_exc())
         if st.button("Reset this page's state"):
-            for key in ("study", "quiz", "mock", "repair"):
+            for key in ("study", "quiz", "mock", "repair", "lp_active"):
                 st.session_state.pop(key, None)
             st.rerun()
 

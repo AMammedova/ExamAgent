@@ -169,6 +169,7 @@ Question type: **{qtype_desc}**
 Target difficulty: **{difficulty}/6** ({difficulty_desc})
 
 {context_block}
+{avoid_block}
 
 This is for a university final exam that tests REASONING, not definitions. The question must:
 - require the student to explain a mechanism, make a comparison, predict a consequence, or
@@ -218,7 +219,8 @@ _DIFF_DESC = {
 
 
 def _llm_question(topic_id: str, qtype: QuestionType, difficulty: int,
-                  retrieval: RetrievalResult | None) -> Question | None:
+                  retrieval: RetrievalResult | None,
+                  avoid_prompts: list[str] | None = None) -> Question | None:
     llm = get_llm()
     if not llm.available:
         return None
@@ -235,6 +237,15 @@ def _llm_question(topic_id: str, qtype: QuestionType, difficulty: int,
         )
         citations = retrieval.citations()[:3]
 
+    avoid_block = ""
+    if avoid_prompts:
+        listed = "\n".join(f"- {p}" for p in avoid_prompts[:8])
+        avoid_block = (
+            "\nAlready asked in this session - write something that tests a genuinely "
+            "different angle, mechanism or failure mode, not a reworded duplicate:\n"
+            + listed + "\n"
+        )
+
     data, resp = llm.complete_json(
         _GEN_PROMPT.format(
             topic=topic_name,
@@ -243,6 +254,7 @@ def _llm_question(topic_id: str, qtype: QuestionType, difficulty: int,
             difficulty=difficulty,
             difficulty_desc=_DIFF_DESC.get(difficulty, "exam level"),
             context_block=context_block,
+            avoid_block=avoid_block,
             minutes=max(2, difficulty),
         ),
         system=system_with_language(EXAMINER_SYSTEM),
@@ -348,8 +360,13 @@ def generate_question(
     seed: int | None = None,
     recent_ar_keys: list[str] | None = None,
     min_difficulty: int = 1,
+    avoid_prompts: list[str] | None = None,
 ) -> Question:
     """Produce one exam question for a topic, degrading gracefully.
+
+    `avoid_prompts` (LLM path only - the bank/template paths already dedupe via
+    `exclude_ids`) lists prompts already asked in the current session, so back
+    to back questions on one topic don't converge on the same angle.
 
     `min_difficulty` is a floor applied to bank-sourced items so that an exam
     asking for level 4-6 never receives a level-2 recall question.
@@ -383,7 +400,7 @@ def generate_question(
 
     retrieval = _retrieval(topic_id) if use_rag else None
     if use_llm:
-        q = _llm_question(topic_id, qtype, difficulty, retrieval)
+        q = _llm_question(topic_id, qtype, difficulty, retrieval, avoid_prompts)
         if q is not None:
             return q
 
@@ -396,23 +413,6 @@ def generate_question(
         return _seed_to_question(rng.choice(pool))
 
     return _template_question(topic_id, qtype, difficulty)
-
-
-def question_from_material(
-    topic_id: str,
-    retrieval: RetrievalResult,
-    question_type: QuestionType = QuestionType.CONCEPTUAL,
-    difficulty: int = 4,
-) -> Question | None:
-    """One question written from a specific slice of the student's own material.
-
-    Unlike `generate_question`, which retrieves whatever is most relevant to a
-    topic, this takes the passage as given - it is what a walkthrough of a
-    single lecture needs, where the question must test *this* section rather
-    than the topic in general. Returns None without an LLM; the caller supplies
-    its own deterministic fallback.
-    """
-    return _llm_question(topic_id, question_type, difficulty, retrieval)
 
 
 def _weighted_type(rng: random.Random) -> QuestionType:

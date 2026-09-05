@@ -12,8 +12,8 @@ streamlit_testing = pytest.importorskip("streamlit.testing.v1")
 AppTest = streamlit_testing.AppTest
 
 APP = str((pathlib.Path(__file__).resolve().parent.parent / "app.py"))
-PAGES = ["Dashboard", "Study", "Quiz", "Mock Exam", "Chat", "Weaknesses",
-         "Knowledge Map", "Progress", "Materials", "Settings"]
+PAGES = ["Dashboard", "Learning Path", "Study", "Quiz", "Mock Exam", "Chat",
+         "Weaknesses", "Knowledge Map", "Progress", "Materials", "Settings"]
 
 
 def _run(page: str | None = None, **state):

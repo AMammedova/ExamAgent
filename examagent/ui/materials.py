@@ -7,7 +7,6 @@ import streamlit as st
 
 from ..models.schemas import SourceType
 from ..services import materials, rag
-from . import walkthrough
 from .common import chip, empty_state, score_bar
 
 SOURCE_LABELS = {
@@ -32,16 +31,14 @@ def render() -> None:
     st.caption("University material outranks Udemy material when the app answers questions "
                "about what the exam expects. Exam samples are used for question style.")
 
-    tabs = st.tabs(["Study a document", "Upload", "Library", "Coverage", "Search"])
+    tabs = st.tabs(["Upload", "Library", "Coverage", "Search"])
     with tabs[0]:
-        walkthrough.render()
-    with tabs[1]:
         _upload()
-    with tabs[2]:
+    with tabs[1]:
         _library()
-    with tabs[3]:
+    with tabs[2]:
         _coverage()
-    with tabs[4]:
+    with tabs[3]:
         _search()
 
 
