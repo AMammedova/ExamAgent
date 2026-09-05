@@ -1,0 +1,24 @@
+# runtime data (progress, uploads, vector store)
+data/
+*.db
+*.db-journal
+
+# secrets
+.env
+
+# real course exam content - kept local only, never pushed
+sample_materials/midterm_dle_ai_202.md
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

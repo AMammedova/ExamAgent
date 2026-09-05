@@ -1,0 +1,25 @@
+# --- core ---
+streamlit>=1.36
+pydantic>=2.7
+pydantic-settings>=2.3
+SQLAlchemy>=2.0
+python-dotenv>=1.0
+numpy>=1.26
+
+# --- LLM providers (optional at runtime, pick via LLM_PROVIDER) ---
+anthropic>=0.34
+openai>=1.40
+
+# --- document ingestion ---
+pypdf>=4.2
+python-docx>=1.1
+python-pptx>=0.6.23
+
+# --- retrieval ---
+scikit-learn>=1.4
+
+# --- optional vector db (LOCAL backend used automatically if missing) ---
+# chromadb>=0.5
+
+# --- dev ---
+pytest>=8.0
