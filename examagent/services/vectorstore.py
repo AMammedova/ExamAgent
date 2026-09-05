@@ -47,6 +47,7 @@ class VectorStore(Protocol):
     def query(self, text: str, k: int = 6,
               filters: dict[str, Any] | None = None) -> list[tuple[Chunk, float]]: ...
     def count(self) -> int: ...
+    def list_by(self, **meta: Any) -> list[Chunk]: ...
     def delete_by(self, **meta: Any) -> int: ...
     def reset(self) -> None: ...
     def stats(self) -> dict[str, Any]: ...
@@ -173,6 +174,17 @@ class LocalVectorStore:
     def count(self) -> int:
         return len(self._docs)
 
+    def list_by(self, **meta: Any) -> list[Chunk]:
+        """Every chunk whose metadata matches, in the order it was added - which
+        is the order it appears in the source document. Retrieval ranks by
+        relevance; a walkthrough needs the document's own sequence instead."""
+        with self._lock:
+            return [
+                Chunk(d["chunk_id"], d["text"], d["metadata"])
+                for d in self._docs
+                if all(d["metadata"].get(k) == v for k, v in meta.items())
+            ]
+
     def delete_by(self, **meta: Any) -> int:
         with self._lock:
             before = len(self._docs)
@@ -294,6 +306,19 @@ class ChromaVectorStore:
             return int(self.collection.count())
         except Exception:
             return 0
+
+    def list_by(self, **meta: Any) -> list[Chunk]:
+        try:
+            got = self.collection.get(where=self._flatten(meta),
+                                      include=["documents", "metadatas"])
+        except Exception as exc:
+            log.warning("chroma list failed: %s", exc)
+            return []
+        ids = got.get("ids") or []
+        docs = got.get("documents") or []
+        metas = got.get("metadatas") or []
+        return [Chunk(str(i), t or "", dict(m or {}))
+                for i, t, m in zip(ids, docs, metas)]
 
     def delete_by(self, **meta: Any) -> int:
         before = self.count()

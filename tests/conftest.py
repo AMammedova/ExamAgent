@@ -1,4 +1,16 @@
-"""Test fixtures: every test runs against a throwaway data directory."""
+"""Test fixtures: every test runs against a throwaway data directory.
+
+Isolation is enforced two ways, because getting it wrong destroys real work:
+
+1. The suite writes its own .env into the temp directory and points
+   EXAMAGENT_ENV_FILE at it. Environment variables alone are not enough -
+   `reload_settings()` re-reads the .env with override=True, so a test that
+   calls it (or any UI code path that does) would otherwise pull the
+   developer's real DATA_DIR back into the running settings.
+2. Every destructive fixture asserts it is operating inside the temp directory
+   before it deletes anything, so a future isolation break fails the test run
+   instead of wiping real uploads and progress.
+"""
 from __future__ import annotations
 
 import os
@@ -10,6 +22,22 @@ import pytest
 
 # Isolate the test run BEFORE examagent.config is imported anywhere.
 _TMP = Path(tempfile.mkdtemp(prefix="examagent_tests_"))
+_ENV_FILE = _TMP / "test.env"
+_ENV_FILE.write_text(
+    "\n".join([
+        f"DATA_DIR={_TMP.as_posix()}",
+        "LLM_PROVIDER=none",
+        "ANTHROPIC_API_KEY=",
+        "OPENAI_API_KEY=",
+        "VECTOR_BACKEND=local",
+        "EMBEDDING_BACKEND=local",
+        "STUDY_DAYS=7",
+        "EXAM_DATE=",
+    ]) + "\n",
+    encoding="utf-8",
+)
+
+os.environ["EXAMAGENT_ENV_FILE"] = str(_ENV_FILE)
 os.environ["DATA_DIR"] = str(_TMP)
 os.environ["LLM_PROVIDER"] = "none"
 os.environ["ANTHROPIC_API_KEY"] = ""
@@ -19,15 +47,38 @@ os.environ["STUDY_DAYS"] = "7"
 os.environ["EXAM_DATE"] = ""
 
 
+def assert_isolated() -> None:
+    """Refuse to run anything destructive outside the throwaway directory."""
+    from examagent.config import get_settings
+
+    data_path = Path(get_settings().data_path).resolve()
+    if _TMP.resolve() not in [data_path, *data_path.parents]:
+        raise AssertionError(
+            f"TEST ISOLATION BROKEN: settings point at {data_path}, not {_TMP}. "
+            "Refusing to continue - a destructive fixture here would delete real "
+            "uploads, progress and the vector store."
+        )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _cleanup():
     yield
     shutil.rmtree(_TMP, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def _isolation_guard():
+    """Checked around every test, so a leak is caught even when it is a test
+    body (not a fixture) that calls reload_settings()."""
+    assert_isolated()
+    yield
+    assert_isolated()
+
+
 @pytest.fixture()
 def clean_db():
     """A database seeded with topics and no student history."""
+    assert_isolated()
     from examagent.models.db import (
         Attempt, Document, KeyValue, Mistake, MockExam, QuestionRecord,
         StudySession, Topic, session_scope,
@@ -45,12 +96,14 @@ def clean_db():
 
 @pytest.fixture()
 def clean_vectorstore():
+    assert_isolated()
     from examagent.services.vectorstore import get_vector_store, reset_vector_store
 
     reset_vector_store()
     store = get_vector_store()
     store.reset()
     yield store
+    assert_isolated()
     store.reset()
     reset_vector_store()
 

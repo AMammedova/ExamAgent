@@ -398,6 +398,23 @@ def generate_question(
     return _template_question(topic_id, qtype, difficulty)
 
 
+def question_from_material(
+    topic_id: str,
+    retrieval: RetrievalResult,
+    question_type: QuestionType = QuestionType.CONCEPTUAL,
+    difficulty: int = 4,
+) -> Question | None:
+    """One question written from a specific slice of the student's own material.
+
+    Unlike `generate_question`, which retrieves whatever is most relevant to a
+    topic, this takes the passage as given - it is what a walkthrough of a
+    single lecture needs, where the question must test *this* section rather
+    than the topic in general. Returns None without an LLM; the caller supplies
+    its own deterministic fallback.
+    """
+    return _llm_question(topic_id, question_type, difficulty, retrieval)
+
+
 def _weighted_type(rng: random.Random) -> QuestionType:
     types = list(DEFAULT_MIX)
     weights = [DEFAULT_MIX[t] for t in types]

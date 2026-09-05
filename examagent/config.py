@@ -12,11 +12,26 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+
+
+def env_file() -> Path:
+    """The .env this process reads, overridable with EXAMAGENT_ENV_FILE.
+
+    `reload_settings` re-reads this file with override=True, so a hardcoded
+    project .env would silently reclaim any run that had pointed itself
+    somewhere else - which is exactly how a test run can end up holding the
+    real DATA_DIR and deleting real uploads. Anything that needs its own
+    settings (the test suite, a second instance on one machine) sets this.
+    """
+    custom = os.getenv("EXAMAGENT_ENV_FILE")
+    return Path(custom) if custom else PROJECT_ROOT / ".env"
+
+
+load_dotenv(env_file())
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(env_file()), extra="ignore")
 
     # --- LLM ---
     llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
@@ -123,9 +138,9 @@ def get_settings() -> Settings:
 
 
 def reload_settings() -> Settings:
-    """Re-read .env after the Settings page writes to it."""
+    """Re-read the active .env after the Settings page writes to it."""
     get_settings.cache_clear()
-    load_dotenv(PROJECT_ROOT / ".env", override=True)
+    load_dotenv(env_file(), override=True)
     return get_settings()
 
 
