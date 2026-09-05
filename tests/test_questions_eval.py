@@ -142,6 +142,42 @@ def test_generation_falls_back_when_a_topic_has_no_calc_engine(clean_db) -> None
     assert q.question_type != QuestionType.CALCULATION or q.calc_spec is not None
 
 
+def test_what_if_prompt_never_hands_the_llm_another_topics_examples(clean_db, monkeypatch) -> None:
+    """Regression: the WHAT_IF template used to list concrete DL components
+    (stride, padding, cell state...) as its only illustration, so an unrelated
+    topic like ml_intro would get handed CNN/RNN vocabulary and the model
+    would just ask about those instead of the actual topic. The prompt must
+    now (a) tell the model to stay on-topic and (b) not offer a bare example
+    list a topic without those components could latch onto."""
+    from examagent.services import question_gen as qg
+
+    captured: dict[str, str] = {}
+
+    class _FakeLLM:
+        available = True
+
+        def complete_json(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            return ({"prompt": "stub", "model_answer": "stub",
+                     "expected_concepts": ["stub"], "expected_reasoning": "stub",
+                     "estimated_time": 120}, None)
+
+    monkeypatch.setattr(qg, "get_llm", lambda: _FakeLLM())
+    qg.generate_question("ml_intro", QuestionType.WHAT_IF, use_llm=True, use_rag=False)
+
+    prompt = captured.get("prompt", "")
+    assert prompt, "the fake LLM was never called"
+    assert "ml_intro" in prompt or "Machine Learning Introduction" in prompt
+    assert "belong to" in prompt or "belongs to the topic" in prompt, (
+        "the topic-fidelity guardrail must be present in the prompt"
+    )
+    stray_examples = ("skip connection", "cell state", "attention, learning rate")
+    assert not any(s in prompt for s in stray_examples), (
+        "a bare list of another topic's components must not be handed to the model "
+        "as if it applied here"
+    )
+
+
 def test_generate_batch_spreads_topics_and_types(clean_db) -> None:
     topics = ["backpropagation", "pca", "attention", "knn"]
     batch = generate_batch(topics, 12, use_llm=False, seed=9)

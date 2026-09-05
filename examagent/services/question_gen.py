@@ -172,6 +172,10 @@ Target difficulty: **{difficulty}/6** ({difficulty_desc})
 {avoid_block}
 
 This is for a university final exam that tests REASONING, not definitions. The question must:
+- be entirely about **{topic}** - every component, parameter or mechanism it references must
+  belong to {topic} itself. If the question-type instructions above mention example
+  components from other topics, they are illustrations of the *pattern* only - never borrow
+  one of those examples verbatim if it is not actually part of {topic};
 - require the student to explain a mechanism, make a comparison, predict a consequence, or
   diagnose a scenario - never "what is X";
 - be answerable in {minutes} minutes of writing;
@@ -196,9 +200,14 @@ _QTYPE_DESC: dict[QuestionType, str] = {
         "to diagnose the cause, justify it, propose an intervention, and name an intervention "
         "that would NOT help and why."),
     QuestionType.WHAT_IF: (
-        "'What happens if...' - remove or change one component (activation, skip connection, "
-        "padding, stride, cell state, attention, learning rate) and ask for the consequence and "
-        "the mechanism behind it."),
+        "'What happens if...' - pick one parameter, assumption or component that is actually "
+        "part of THIS topic (e.g. for a CNN topic that might be stride or padding, for an "
+        "optimizer topic the learning rate, for a clustering topic the number of clusters - "
+        "always something that belongs to the topic at hand, never borrowed from a different "
+        "topic), change or remove it, and ask for the consequence and the mechanism behind it. "
+        "If the topic has no natural component to swap, ask what happens under a boundary "
+        "condition of the topic itself instead (e.g. very little data, a degenerate input, an "
+        "extreme hyperparameter) rather than reaching for an unrelated topic's mechanism."),
     QuestionType.DIAGRAM: (
         "Architecture interpretation - describe an architecture in text (layers, shapes, "
         "connections) and ask what each component does, what flows through it, what dimensions "
