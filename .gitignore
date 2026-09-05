@@ -1,5 +1,6 @@
-# runtime data (progress, uploads, vector store)
-data/
+# runtime data (progress, uploads, vector store) - repo-root only, must not
+# match examagent/data/ (the topics/seed-question source package)
+/data/
 *.db
 *.db-journal
 
