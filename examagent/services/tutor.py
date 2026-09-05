@@ -22,7 +22,7 @@ from ..models.schemas import (
     SessionMode,
 )
 from . import rag
-from .llm import TUTOR_SYSTEM, get_llm, system_with_language
+from .llm import TUTOR_SYSTEM, get_llm, language_directive, system_with_language
 from .progress import topic_report
 from .question_gen import generate_question
 
@@ -78,7 +78,7 @@ Produce a TIGHT lesson. The student has minutes, not hours. Rules:
 - If the source material is provided, ground your claims in it and cite [S1], [S2].
   If it does not cover something, rely on standard knowledge but do not invent
   course-specific details (lecture numbers, notation the course uses, etc.).
-
+{language_reminder}
 Return JSON exactly:
 {{"explanation": "...", "intuition": "...", "mathematics": "...",
   "exam_points": ["...", "..."], "example": "..."}}"""
@@ -118,6 +118,10 @@ def build_lesson(topic_id: str, use_llm: bool = True, use_rag: bool = True) -> L
                 days=get_settings().days_remaining(),
                 profile=profile,
                 context_block=context_block,
+                # repeated here, not just in the system prompt: a long English
+                # context_block right before this can otherwise pull the model
+                # back into English by the time it writes the JSON fields
+                language_reminder=language_directive(),
             ),
             system=system_with_language(TUTOR_SYSTEM),
             temperature=0.4,
@@ -252,7 +256,8 @@ def explain(query: str, topic_id: str | None = None, beginner: bool = False,
         resp = llm.complete(
             f"{context_block}\nSTUDENT'S QUESTION: {query}\n\n{style}"
             "Answer concisely (at most 8 sentences) and end with one question that tests "
-            "whether they actually understood.",
+            "whether they actually understood."
+            f"{language_directive()}",
             system=system_with_language(TUTOR_SYSTEM),
             max_tokens=1200,
         )

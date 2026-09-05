@@ -127,6 +127,20 @@ def _topic_view(topic_id: str) -> None:
         st.session_state.pop(STATE, None)
         st.rerun()
 
+    prev_id, next_id = lp.neighbors(topic_id)
+    position = lp.CURRICULUM.index(topic_id) + 1
+    nav1, nav2, nav3 = st.columns([1, 1, 1])
+    if nav1.button("◀ Previous topic", disabled=prev_id is None, use_container_width=True,
+                  help="Browse without affecting progress — this topic stays as it was"):
+        _open(prev_id)
+        st.rerun()
+    nav2.markdown(f"<div style='text-align:center;padding-top:8px' class='ea-muted'>"
+                  f"{position} / {len(lp.CURRICULUM)}</div>", unsafe_allow_html=True)
+    if nav3.button("Next topic ▶", disabled=next_id is None, use_container_width=True,
+                  help="Browse without affecting progress — this topic stays as it was"):
+        _open(next_id)
+        st.rerun()
+
     # ---- learn
     if state.get("lesson_for") != topic_id:
         with st.spinner("Preparing the lesson…"):

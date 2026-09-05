@@ -28,7 +28,7 @@ from ..models.schemas import (
 from . import rag
 from .assertion_engine import generate_assertion_reason
 from .calc_engine import generate_problem, topic_has_calculation
-from .llm import EXAMINER_SYSTEM, get_llm, system_with_language
+from .llm import EXAMINER_SYSTEM, get_llm, language_directive, system_with_language
 
 log = get_logger(__name__)
 
@@ -180,7 +180,7 @@ This is for a university final exam that tests REASONING, not definitions. The q
   diagnose a scenario - never "what is X";
 - be answerable in {minutes} minutes of writing;
 - have a precise, defensible model answer that an examiner could mark against.
-
+{language_reminder}
 Return JSON exactly:
 {{"prompt": "the question as the student sees it",
   "model_answer": "a full-mark examiner answer, 4-10 sentences, technically precise",
@@ -265,6 +265,7 @@ def _llm_question(topic_id: str, qtype: QuestionType, difficulty: int,
             context_block=context_block,
             avoid_block=avoid_block,
             minutes=max(2, difficulty),
+            language_reminder=language_directive(),
         ),
         system=system_with_language(EXAMINER_SYSTEM),
         temperature=0.75,

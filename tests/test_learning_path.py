@@ -39,6 +39,29 @@ def test_curriculum_is_deterministic_across_calls() -> None:
     assert lp.curriculum_order() == lp.curriculum_order()
 
 
+def test_neighbors_of_the_first_topic_has_no_previous() -> None:
+    prev_id, next_id = lp.neighbors(lp.CURRICULUM[0])
+    assert prev_id is None
+    assert next_id == lp.CURRICULUM[1]
+
+
+def test_neighbors_of_the_last_topic_has_no_next() -> None:
+    prev_id, next_id = lp.neighbors(lp.CURRICULUM[-1])
+    assert prev_id == lp.CURRICULUM[-2]
+    assert next_id is None
+
+
+def test_neighbors_of_a_middle_topic_are_its_curriculum_neighbours() -> None:
+    mid = lp.CURRICULUM[10]
+    prev_id, next_id = lp.neighbors(mid)
+    assert prev_id == lp.CURRICULUM[9]
+    assert next_id == lp.CURRICULUM[11]
+
+
+def test_neighbors_of_an_unknown_topic_is_none_none() -> None:
+    assert lp.neighbors("not_a_real_topic") == (None, None)
+
+
 # ---------------------------------------------------------------- state
 def test_a_fresh_path_starts_at_the_first_curriculum_topic(clean_db) -> None:
     assert lp.current_topic_id() == lp.CURRICULUM[0]

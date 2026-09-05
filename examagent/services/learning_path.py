@@ -153,6 +153,19 @@ def rows() -> list[Row]:
     return out
 
 
+def neighbors(topic_id: str) -> tuple[str | None, str | None]:
+    """The topic immediately before and after this one in the curriculum -
+    for free browsing, independent of completion state. Either side is None
+    at the ends of the path."""
+    try:
+        i = CURRICULUM.index(topic_id)
+    except ValueError:
+        return None, None
+    prev_id = CURRICULUM[i - 1] if i > 0 else None
+    next_id = CURRICULUM[i + 1] if i + 1 < len(CURRICULUM) else None
+    return prev_id, next_id
+
+
 def current_topic_id() -> str | None:
     """The first topic that is neither completed nor skipped - where
     'Continue' resumes."""
