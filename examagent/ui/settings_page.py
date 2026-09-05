@@ -8,7 +8,14 @@ import streamlit as st
 from ..config import PROJECT_ROOT, get_settings, reload_settings
 from ..services.assertion_engine import bank_stats
 from ..services.calc_engine import GENERATORS
-from ..services.llm import LANGUAGE_NAMES, get_llm, reset_llm
+from ..services.llm import (
+    LANGUAGE_NAMES,
+    clear_session_llm,
+    get_llm,
+    reset_llm,
+    session_llm_active,
+    set_session_llm,
+)
 from ..services.vectorstore import reset_vector_store
 
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -31,9 +38,12 @@ def render() -> None:
 
 
 def _llm(settings) -> None:
+    session_active = session_llm_active()
     status = get_llm().status()
     if status["mode"] == "LLM":
-        st.success(f"Connected: **{status['provider']}** · `{status['model']}`")
+        scope_note = (" · **only visible to you, this browser session**" if session_active
+                      else " · shared config, applies to every visitor of this install")
+        st.success(f"Connected: **{status['provider']}** · `{status['model']}`{scope_note}")
     else:
         st.info(
             "**Offline mode.** Everything still works: calculation problems, "
@@ -44,22 +54,52 @@ def _llm(settings) -> None:
     if status["error"]:
         st.error(f"Client error: {status['error']}")
 
+    scope = st.radio(
+        "Where should this key apply?",
+        ["session", "shared"],
+        index=0,
+        format_func=lambda v: ("Only to my session (recommended on a shared/public link)"
+                               if v == "session" else
+                               "This installation's .env — every visitor uses it (only if "
+                               "you run this instance yourself, e.g. locally)"),
+        help="A shared deployment has one server for every visitor. 'Shared' writes the "
+             "key to the server's own .env — it becomes the key every current and future "
+             "visitor's requests use, not just yours. 'Session' keeps it only in your "
+             "browser tab's memory: nobody else sees it, it is never written to disk, and "
+             "it is gone once this tab's session ends.",
+    )
+    if session_active and scope == "session":
+        if st.button("Clear my session key"):
+            clear_session_llm()
+            st.rerun()
+
+    defaults = (settings.llm_provider, settings.model_name, settings.max_tokens,
+                settings.temperature)
+    if session_active:
+        ov = st.session_state.get("_llm_session_override") or {}
+        defaults = (ov.get("provider", defaults[0]), ov.get("model", defaults[1]),
+                    ov.get("max_tokens") or defaults[2], ov.get("temperature")
+                    if ov.get("temperature") is not None else defaults[3])
+
     with st.form("llm_form"):
         provider = st.selectbox(
             "Provider", ["anthropic", "openai", "none"],
-            index=["anthropic", "openai", "none"].index(settings.llm_provider)
-            if settings.llm_provider in ("anthropic", "openai", "none") else 0,
+            index=["anthropic", "openai", "none"].index(defaults[0])
+            if defaults[0] in ("anthropic", "openai", "none") else 0,
         )
-        key = st.text_input(
-            "API key", type="password",
-            value="",
-            placeholder="leave blank to keep the existing key",
-            help="Stored in the local .env file. Never sent anywhere except the provider.",
-        )
-        model = st.text_input("Model name", value=settings.model_name)
+        key_help = ("Kept only in this browser tab's memory. Never written to disk, "
+                    "never sent anywhere except the provider you picked above."
+                    if scope == "session" else
+                    "Stored in the local .env file — shared by every visitor of this "
+                    "install. Never sent anywhere except the provider.")
+        key_placeholder = ("required — a session key starts empty every time"
+                           if scope == "session" else "leave blank to keep the existing key")
+        key = st.text_input("API key", type="password", value="",
+                            placeholder=key_placeholder, help=key_help)
+        model = st.text_input("Model name", value=defaults[1])
         c1, c2 = st.columns(2)
-        max_tokens = c1.number_input("Max tokens", 256, 8192, settings.max_tokens, step=128)
-        temperature = c2.slider("Temperature", 0.0, 1.0, settings.temperature, 0.05)
+        max_tokens = c1.number_input("Max tokens", 256, 8192, defaults[2], step=128)
+        temperature = c2.slider("Temperature", 0.0, 1.0, defaults[3], 0.05)
 
         st.markdown("**Language of explanations**")
         lang_codes = list(LANGUAGE_NAMES)
@@ -71,7 +111,8 @@ def _llm(settings) -> None:
             help="Applies to LLM-generated lessons, chat explanations, generated "
                  "questions and open-answer feedback. The deterministic offline content "
                  "(calculation problems, the assertion-reason bank, the seed question "
-                 "bank) is fixed English text and is not translated.",
+                 "bank) is fixed English text and is not translated. This one is always "
+                 "a shared, installation-wide default, even in session-key mode.",
         )
         if language != "en":
             st.caption(
@@ -82,21 +123,34 @@ def _llm(settings) -> None:
             )
 
         if st.form_submit_button("Save", type="primary"):
-            updates = {
-                "LLM_PROVIDER": provider,
-                "MODEL_NAME": model,
-                "MAX_TOKENS": str(int(max_tokens)),
-                "TEMPERATURE": str(temperature),
-                "LANGUAGE": language,
-            }
-            if key.strip():
-                updates["ANTHROPIC_API_KEY" if provider == "anthropic"
-                        else "OPENAI_API_KEY"] = key.strip()
-            _write_env(updates)
-            reload_settings()
-            reset_llm()
-            st.success("Saved.")
-            st.rerun()
+            if scope == "session":
+                if not key.strip():
+                    st.error("A session key can't be left blank — type your API key above.")
+                else:
+                    set_session_llm(provider, key.strip(), model,
+                                    max_tokens=int(max_tokens), temperature=temperature)
+                    # language stays a shared, installation-wide default even here
+                    if language != settings.language:
+                        _write_env({"LANGUAGE": language})
+                        reload_settings()
+                    st.success("Saved — active for your browser session only.")
+                    st.rerun()
+            else:
+                updates = {
+                    "LLM_PROVIDER": provider,
+                    "MODEL_NAME": model,
+                    "MAX_TOKENS": str(int(max_tokens)),
+                    "TEMPERATURE": str(temperature),
+                    "LANGUAGE": language,
+                }
+                if key.strip():
+                    updates["ANTHROPIC_API_KEY" if provider == "anthropic"
+                            else "OPENAI_API_KEY"] = key.strip()
+                _write_env(updates)
+                reload_settings()
+                reset_llm()
+                st.success("Saved — applies to every visitor of this installation.")
+                st.rerun()
 
     st.caption("Model suggestions — Anthropic: `claude-sonnet-4-5`, `claude-opus-4-1`; "
                "OpenAI: `gpt-4o`, `gpt-4o-mini`.")

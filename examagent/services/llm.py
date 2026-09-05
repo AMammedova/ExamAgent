@@ -35,12 +35,33 @@ class LLMResponse:
 
 
 class LLMClient:
-    """Thin wrapper over Anthropic / OpenAI chat completion."""
+    """Thin wrapper over Anthropic / OpenAI chat completion.
 
-    def __init__(self) -> None:
+    By default everything comes from the global `.env`-backed settings (the
+    right behaviour for a single-user local install). Pass `provider`/`api_key`/
+    `model`/... to override any of that for one specific client instance without
+    touching the shared settings - this is what per-session credentials (see
+    `set_session_llm` below) build on, so one visitor's key on a shared
+    deployment never becomes every visitor's key.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> None:
         self.settings = get_settings()
-        self.provider = self.settings.llm_provider
-        self.model = self.settings.model_name
+        self.provider = (provider or self.settings.llm_provider).strip().lower()
+        self.model = model or self.settings.model_name
+        self._api_key = api_key if api_key is not None else self.settings.api_key
+        self._default_max_tokens = max_tokens or self.settings.max_tokens
+        self._default_temperature = (
+            self.settings.temperature if temperature is None else temperature
+        )
         self._client: Any = None
         self._init_error: str | None = None
         if self.available:
@@ -53,7 +74,8 @@ class LLMClient:
     # ---- capability ----
     @property
     def available(self) -> bool:
-        return self.settings.llm_available and self._init_error is None
+        return (bool(self._api_key.strip()) and self.provider in ("anthropic", "openai")
+                and self._init_error is None)
 
     def status(self) -> dict[str, Any]:
         return {
@@ -68,11 +90,11 @@ class LLMClient:
         if self.provider == "anthropic":
             import anthropic
 
-            return anthropic.Anthropic(api_key=self.settings.api_key)
+            return anthropic.Anthropic(api_key=self._api_key)
         if self.provider == "openai":
             import openai
 
-            return openai.OpenAI(api_key=self.settings.api_key)
+            return openai.OpenAI(api_key=self._api_key)
         raise LLMError(f"unsupported provider: {self.provider}")
 
     # ---- calls ----
@@ -88,8 +110,8 @@ class LLMClient:
             return LLMResponse("", self.provider, self.model,
                                error="no LLM configured (offline mode)")
 
-        max_tokens = max_tokens or self.settings.max_tokens
-        temperature = self.settings.temperature if temperature is None else temperature
+        max_tokens = max_tokens or self._default_max_tokens
+        temperature = self._default_temperature if temperature is None else temperature
         started = time.time()
         last_err = ""
 
@@ -198,8 +220,40 @@ def extract_json(text: str) -> dict[str, Any] | list[Any] | None:
 
 _client: LLMClient | None = None
 
+#: session_state key holding this visitor's own {provider, api_key, model,
+#: max_tokens, temperature} - set by the Settings page's "only for my session"
+#: option, never written to disk, invisible to every other visitor.
+_SESSION_OVERRIDE_KEY = "_llm_session_override"
+_SESSION_CLIENT_KEY = "_llm_session_client"
+
+
+def _session_state() -> Any:
+    """The running Streamlit session's state, or None outside a Streamlit app
+    (tests, scripts) - callers must treat None as "no session, use the global
+    client"."""
+    try:
+        import streamlit as st
+
+        # st.session_state raises outside a running Streamlit script context
+        return st.session_state
+    except Exception:
+        return None
+
 
 def get_llm(force: bool = False) -> LLMClient:
+    """The active LLM client: this browser session's own credentials if it has
+    set any (see `set_session_llm`), otherwise the shared global client built
+    from `.env`. A session override is only ever read from and written to
+    `st.session_state` - it never touches the global settings or the client
+    any other visitor gets."""
+    state = _session_state()
+    if state is not None and state.get(_SESSION_OVERRIDE_KEY):
+        client = state.get(_SESSION_CLIENT_KEY)
+        if client is None or force:
+            client = LLMClient(**state[_SESSION_OVERRIDE_KEY])
+            state[_SESSION_CLIENT_KEY] = client
+        return client
+
     global _client
     if _client is None or force:
         _client = LLMClient()
@@ -207,8 +261,48 @@ def get_llm(force: bool = False) -> LLMClient:
 
 
 def reset_llm() -> None:
+    """Reset the shared global client (built from `.env`). Does not touch any
+    session-scoped override - use `clear_session_llm` for that."""
     global _client
     _client = None
+
+
+def set_session_llm(
+    provider: str,
+    api_key: str,
+    model: str,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+) -> None:
+    """Set LLM credentials for *this browser session only*. Never written to
+    `.env`, never visible to or usable by any other visitor of a shared
+    deployment - it lives entirely in this session's `st.session_state`."""
+    state = _session_state()
+    if state is None:
+        raise LLMError("no active Streamlit session to attach credentials to")
+    state[_SESSION_OVERRIDE_KEY] = {
+        "provider": provider,
+        "api_key": api_key,
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    state.pop(_SESSION_CLIENT_KEY, None)
+
+
+def clear_session_llm() -> None:
+    """Drop this session's own credentials; subsequent calls fall back to the
+    shared global client again."""
+    state = _session_state()
+    if state is not None:
+        state.pop(_SESSION_OVERRIDE_KEY, None)
+        state.pop(_SESSION_CLIENT_KEY, None)
+
+
+def session_llm_active() -> bool:
+    """Whether this browser session currently has its own credentials set."""
+    state = _session_state()
+    return bool(state is not None and state.get(_SESSION_OVERRIDE_KEY))
 
 
 # --------------------------------------------------------------- language

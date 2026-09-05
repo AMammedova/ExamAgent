@@ -256,13 +256,14 @@ def readiness_block(readiness, compact: bool = False) -> None:
 
 def llm_badge() -> None:
     from ..config import get_settings
-    from ..services.llm import get_llm
+    from ..services.llm import get_llm, session_llm_active
 
     status = get_llm().status()
     lang = get_settings().language
     lang_tag = f" · {lang.upper()}" if lang != "en" else ""
     if status["mode"] == "LLM":
-        st.caption(f"🟢 {status['provider']} · {status['model']}{lang_tag}")
+        scope_tag = " · your session key" if session_llm_active() else ""
+        st.caption(f"🟢 {status['provider']} · {status['model']}{lang_tag}{scope_tag}")
     else:
         note = ("⚪ Offline mode — deterministic engines "
                "(add an API key in Settings for generated questions)")

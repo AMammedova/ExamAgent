@@ -93,6 +93,15 @@ an exam must not stop you studying.
 Add a key in **Settings → LLM provider**, or in `.env`. The toggle in the sidebar
 forces offline mode at any time (faster, free).
 
+**Two scopes for the key**, picked with a radio on that page:
+- **Session** (default) — kept only in `st.session_state` for your browser tab. Never
+  written to disk, never visible to or usable by anyone else. This is the safe default
+  on a shared/public deployment: one visitor's key never becomes every visitor's key.
+- **Shared (.env)** — written to this installation's `.env`, so it applies to every
+  visitor of this server. Only use this when you are the only person running this
+  instance (e.g. locally on your own machine) and want the key to persist across
+  restarts without re-entering it.
+
 ---
 
 ## Architecture
