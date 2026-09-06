@@ -4,6 +4,13 @@ from __future__ import annotations
 import pytest
 
 from examagent.data.topics import TOPIC_SEEDS
+from examagent.models.schemas import (
+    Category,
+    Evaluation,
+    Priority,
+    Question,
+    QuestionType,
+)
 from examagent.services import learning_path as lp
 
 
@@ -125,3 +132,76 @@ def test_rows_mark_exactly_one_topic_as_current(clean_db) -> None:
 def test_rows_are_in_curriculum_order(clean_db) -> None:
     ids = [r.topic.id for r in lp.rows()]
     assert ids == lp.CURRICULUM
+
+
+# ---------------------------------------------------------------- completed ids
+def test_completed_topic_ids_are_in_curriculum_order(clean_db) -> None:
+    # complete out of curriculum order - the report must still follow the order
+    lp.mark_complete(lp.CURRICULUM[3])
+    lp.mark_complete(lp.CURRICULUM[0])
+    lp.mark_complete(lp.CURRICULUM[1])
+    assert lp.completed_topic_ids() == [lp.CURRICULUM[0], lp.CURRICULUM[1], lp.CURRICULUM[3]]
+
+
+def test_skipped_topics_are_not_completed(clean_db) -> None:
+    lp.mark_skip(lp.CURRICULUM[0])
+    assert lp.completed_topic_ids() == []
+
+
+def test_completed_topic_ids_empty_on_a_fresh_path(clean_db) -> None:
+    assert lp.completed_topic_ids() == []
+
+
+# ---------------------------------------------------------------- per-topic Q&A
+def _question(topic_id: str, prompt: str = "prompt text") -> Question:
+    return Question(
+        id=f"q:{topic_id}:{prompt[:8]}", topic=topic_id, category=Category.ML,
+        question_type=QuestionType.CONCEPTUAL, difficulty=4, priority=Priority.CRITICAL,
+        prompt=prompt,
+    )
+
+
+def test_qa_history_is_empty_before_anything_is_answered(clean_db) -> None:
+    assert lp.qa_history("ml_intro") == []
+
+
+def test_save_qa_persists_prompt_answer_and_score(clean_db) -> None:
+    tid = "ml_intro"
+    q = _question(tid, "Why does supervised learning need labels?")
+    ev = Evaluation(score=7.5, correct=True, improvement="Be more precise about X.")
+    lp.save_qa(tid, q, "because labels supervise it", ev)
+
+    history = lp.qa_history(tid)
+    assert len(history) == 1
+    assert history[0]["prompt"] == q.prompt
+    assert history[0]["answer"] == "because labels supervise it"
+    assert history[0]["score"] == 7.5
+    assert history[0]["correct"] is True
+    assert history[0]["improvement"] == "Be more precise about X."
+
+
+def test_qa_history_accumulates_across_calls_in_order(clean_db) -> None:
+    tid = "pca"
+    for i in range(3):
+        lp.save_qa(tid, _question(tid, f"question {i}"), f"answer {i}",
+                  Evaluation(score=float(i)))
+    history = lp.qa_history(tid)
+    assert [h["answer"] for h in history] == ["answer 0", "answer 1", "answer 2"]
+
+
+def test_qa_history_is_per_topic(clean_db) -> None:
+    lp.save_qa("pca", _question("pca"), "a1", Evaluation(score=5))
+    lp.save_qa("knn", _question("knn"), "a2", Evaluation(score=6))
+    assert len(lp.qa_history("pca")) == 1
+    assert len(lp.qa_history("knn")) == 1
+    assert lp.qa_history("pca")[0]["answer"] == "a1"
+
+
+def test_qa_history_caps_at_the_configured_maximum(clean_db) -> None:
+    tid = "ml_intro"
+    for i in range(lp.MAX_QA_PER_TOPIC + 5):
+        lp.save_qa(tid, _question(tid, f"q{i}"), f"a{i}", Evaluation(score=5))
+    history = lp.qa_history(tid)
+    assert len(history) == lp.MAX_QA_PER_TOPIC
+    # oldest entries fall off the front; the most recent must survive
+    assert history[-1]["answer"] == f"a{lp.MAX_QA_PER_TOPIC + 4}"

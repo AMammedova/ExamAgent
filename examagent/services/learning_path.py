@@ -12,12 +12,19 @@ what to *revisit*; this decides what to see *first*.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from ..data.topics import TOPIC_SEEDS
 from ..models.db import Topic, all_topics, kv_get, kv_set, session_scope
+from ..models.schemas import Evaluation, Question
 
 KV_KEY = "learning_path_state"
+QA_KV_PREFIX = "learning_path_qa:"
+
+#: stored answers kept per topic - old rounds fall off the front rather than
+#: growing forever if a topic is retaken many times
+MAX_QA_PER_TOPIC = 12
 
 #: quiz questions answered per topic before the path advances - kept small on
 #: purpose: the goal here is finishing topics quickly, not the full adaptive
@@ -175,6 +182,43 @@ def current_topic_id() -> str | None:
         if tid not in seen:
             return tid
     return None
+
+
+def completed_topic_ids() -> list[str]:
+    """Topics marked done, in curriculum order - what a quick mock exam scoped
+    to 'what I've actually studied' should draw from."""
+    done = set(_load()["completed"])
+    return [tid for tid in CURRICULUM if tid in done]
+
+
+# --------------------------------------------------------------- per-topic Q&A
+def _qa_key(topic_id: str) -> str:
+    return f"{QA_KV_PREFIX}{topic_id}"
+
+
+def save_qa(topic_id: str, question: Question, answer: str, evaluation: Evaluation) -> None:
+    """Persist one answered Learning Path question under its topic, so
+    revisiting the topic later - even after an app restart - shows what was
+    asked and how it went, instead of it simply being gone."""
+    with session_scope() as s:
+        history = kv_get(s, _qa_key(topic_id), []) or []
+        history.append({
+            "prompt": question.prompt,
+            "question_type": question.question_type.value,
+            "difficulty": question.difficulty,
+            "answer": answer,
+            "score": round(evaluation.score, 1),
+            "correct": evaluation.correct,
+            "improvement": evaluation.improvement,
+            "answered_at": datetime.utcnow().isoformat(),
+        })
+        kv_set(s, _qa_key(topic_id), history[-MAX_QA_PER_TOPIC:])
+
+
+def qa_history(topic_id: str) -> list[dict[str, Any]]:
+    """Every stored answer for this topic, oldest first."""
+    with session_scope() as s:
+        return kv_get(s, _qa_key(topic_id), []) or []
 
 
 def summary() -> dict[str, Any]:

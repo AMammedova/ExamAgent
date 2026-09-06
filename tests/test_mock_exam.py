@@ -58,6 +58,24 @@ def test_exam_follows_the_blueprint(clean_db) -> None:
     assert len({q.id for q in questions}) == len(questions), "no duplicate questions"
 
 
+def test_topic_ids_restricts_the_paper_to_that_pool(clean_db) -> None:
+    allowed = ["backpropagation", "pca", "knn", "attention", "cnn_basics"]
+    exam = mock_exam.build_exam(n_questions=10, use_llm=False, seed=5,
+                                topic_ids=allowed)
+    topics = {q.topic for q in exam["questions"]}
+    assert topics, "the scoped pool must still produce questions"
+    assert topics <= set(allowed), (
+        f"question topics {topics} must all come from the allowed set {allowed}"
+    )
+
+
+def test_topic_ids_with_a_single_topic_still_builds_a_paper(clean_db) -> None:
+    exam = mock_exam.build_exam(n_questions=6, use_llm=False, seed=6,
+                                topic_ids=["backpropagation"])
+    assert exam["questions"]
+    assert {q.topic for q in exam["questions"]} == {"backpropagation"}
+
+
 def test_short_exam_still_mixes_formats(clean_db) -> None:
     exam = mock_exam.build_exam(n_questions=8, duration_minutes=30, use_llm=False, seed=2)
     assert len(exam["questions"]) == 8

@@ -157,6 +157,11 @@ def _topic_view(topic_id: str) -> None:
 
     # ---- quiz (3 questions, fixed difficulty, no adaptive escalation)
     st.divider()
+    history = lp.qa_history(topic_id)
+    if len(history) >= lp.QUESTIONS_PER_TOPIC and not state.get("retaking"):
+        _review_view(topic_id, history)
+        return
+
     scores: list[float] = state.setdefault("scores", [])
     idx = len(scores)
 
@@ -195,6 +200,7 @@ def _topic_view(topic_id: str) -> None:
                        else "; ".join(f"{k}={v}" for k, v in answer.items()))
                 progress.record_attempt(q, ev, student_answer=text,
                                         context="learning_path", seconds=100)
+                lp.save_qa(topic_id, q, text, ev)
                 state["eval"] = ev
                 st.rerun()
         return
@@ -206,6 +212,40 @@ def _topic_view(topic_id: str) -> None:
     next_label = "Next question" if idx + 1 < lp.QUESTIONS_PER_TOPIC else "Finish topic"
     if st.button(next_label, type="primary"):
         scores.append(state["eval"].score)
+        st.rerun()
+
+
+def _review_view(topic_id: str, history: list[dict]) -> None:
+    """What was asked on this topic before and how it went - shown instead of
+    silently generating a fresh quiz, so nothing answered here is ever lost."""
+    recent = history[-lp.QUESTIONS_PER_TOPIC:]
+    mean = sum(h["score"] for h in recent) / len(recent) if recent else 0.0
+    st.markdown(f"**Already answered** — mean {mean:.1f}/10 on the last "
+               f"{len(recent)} question(s)."
+               + (f" ({len(history)} on record across retakes.)"
+                  if len(history) > len(recent) else ""))
+
+    for i, h in enumerate(history, 1):
+        with st.container(border=True):
+            st.markdown(f"**Q{i}.** {h['prompt']}")
+            st.markdown(f"*Your answer:* {h['answer']}")
+            color = ("#2da44e" if h["score"] >= 8 else
+                     "#d4a72c" if h["score"] >= 5 else "#cf222e")
+            st.markdown(chip(f"{h['score']:.1f}/10", color), unsafe_allow_html=True)
+            if h.get("improvement"):
+                st.caption(h["improvement"])
+
+    if st.button("Retake this topic's quiz", type="primary"):
+        state = _state()
+        state["retaking"] = True
+        state["scores"] = []
+        state["asked"] = []
+        # seed with every prompt ever asked here, not just this session's, so
+        # a retake still avoids repeating an old round's questions
+        state["asked_prompts"] = [h["prompt"] for h in history]
+        state.pop("q_index", None)
+        state.pop("q", None)
+        state.pop("eval", None)
         st.rerun()
 
 

@@ -7,6 +7,7 @@ from typing import Any
 import streamlit as st
 
 from ..models.schemas import MockExamReport, Question
+from ..services import learning_path as lp
 from ..services import mock_exam
 from .common import (
     TYPE_LABEL,
@@ -22,6 +23,36 @@ STATE = "mock"
 
 def _state() -> dict[str, Any]:
     return st.session_state.setdefault(STATE, {})
+
+
+def _quick_mock_from_learning_path(state: dict[str, Any]) -> None:
+    """One-click exam scoped to only the topics done in the Learning Path -
+    for testing yourself on what you've actually covered, not the full
+    syllabus, without configuring anything."""
+    done_ids = lp.completed_topic_ids()
+    if not done_ids:
+        return
+
+    n = min(18, max(6, len(done_ids) * 2))
+    minutes = max(15, round(n * 1.8))
+    with st.container(border=True):
+        st.markdown(f"📍 **Quick Mock — Learning Path** ({len(done_ids)} topic"
+                   + ("s" if len(done_ids) != 1 else "") + " done)")
+        st.caption(f"Only from topics you've already learned. ~{n} questions, "
+                  f"~{minutes} min.")
+        if st.button("Generate quick mock", type="primary", key="quick_mock_lp"):
+            with st.spinner("Building the paper…"):
+                exam = mock_exam.build_exam(
+                    n_questions=n, duration_minutes=minutes,
+                    label="Quick Mock — Learning Path",
+                    use_llm=bool(st.session_state.get("use_llm", True)),
+                    balance_ml_dl=True, topic_ids=done_ids,
+                )
+            state["exam"] = exam
+            state["answers"] = {}
+            state["started_at"] = time.time()
+            state["index"] = 0
+            st.rerun()
 
 
 def render() -> None:
@@ -42,6 +73,10 @@ def _render_setup(state: dict[str, Any]) -> None:
     st.caption("Real conditions: a clock, no hints, no feedback until you submit.")
     llm_badge()
 
+    _quick_mock_from_learning_path(state)
+
+    st.divider()
+    st.markdown("#### Custom exam")
     c1, c2, c3 = st.columns(3)
     with c1:
         n = st.slider("Questions", 6, 30, 18)

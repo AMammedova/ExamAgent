@@ -46,16 +46,27 @@ SHORT_BLUEPRINT: list[tuple[QuestionType, int]] = [
 ]
 
 
-def _select_topics(session, n: int, category: str | None = None) -> list[Topic]:
-    """Mix the student's weak topics with high-relevance topics they may know."""
+def _select_topics(session, n: int, category: str | None = None,
+                   allowed_ids: set[str] | None = None) -> list[Topic]:
+    """Mix the student's weak topics with high-relevance topics they may know.
+
+    `allowed_ids`, when given, restricts the whole pool to those topics -
+    e.g. only what has actually been covered in the Learning Path so far,
+    for a mock exam scoped to material the student has actually seen.
+    """
     topics = [t for t in all_topics(session)
-              if (category is None or t.category == category)]
-    weak = [t for t in weakest_topics(session, limit=n)
-            if category is None or t.category == category]
+              if (category is None or t.category == category)
+              and (allowed_ids is None or t.id in allowed_ids)]
+    weak = [t for t in weakest_topics(session, limit=max(n, len(allowed_ids or [])))
+            if (category is None or t.category == category)
+            and (allowed_ids is None or t.id in allowed_ids)]
     relevant = sorted(
         [t for t in topics if t.priority in ("CRITICAL", "HIGH")],
         key=lambda t: -(t.exam_relevance * Priority(t.priority).weight),
     )
+    if allowed_ids is not None and not relevant:
+        # a small allowed set may be entirely MEDIUM/LOW priority - still usable
+        relevant = sorted(topics, key=lambda t: -(t.exam_relevance))
     out: list[Topic] = []
     seen: set[str] = set()
     # alternate weak / high-relevance so the paper is not purely a weakness drill
@@ -76,12 +87,19 @@ def build_exam(
     use_llm: bool = True,
     balance_ml_dl: bool = True,
     seed: int | None = None,
+    topic_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Generate a full paper and persist it."""
+    """Generate a full paper and persist it.
+
+    `topic_ids`, when given, restricts every question to that set of topics -
+    e.g. a quick mock scoped to only what the Learning Path has covered so
+    far, rather than the full syllabus.
+    """
     import random
 
     rng = random.Random(seed)
     blueprint = EXAM_BLUEPRINT if n_questions >= 14 else SHORT_BLUEPRINT
+    allowed_ids = set(topic_ids) if topic_ids else None
 
     # scale the blueprint to the requested length
     total_bp = sum(c for _, c in blueprint)
@@ -95,10 +113,10 @@ def build_exam(
 
     with session_scope() as s:
         if balance_ml_dl:
-            ml_topics = _select_topics(s, n_questions, Category.ML.value)
-            dl_topics = _select_topics(s, n_questions, Category.DL.value)
+            ml_topics = _select_topics(s, n_questions, Category.ML.value, allowed_ids)
+            dl_topics = _select_topics(s, n_questions, Category.DL.value, allowed_ids)
         else:
-            ml_topics = dl_topics = _select_topics(s, n_questions)
+            ml_topics = dl_topics = _select_topics(s, n_questions, allowed_ids=allowed_ids)
 
     questions: list[Question] = []
     seen_ids: set[str] = set()
