@@ -232,10 +232,34 @@ def _review_view(topic_id: str, history: list[dict]) -> None:
             color = ("#2da44e" if h["score"] >= 8 else
                      "#d4a72c" if h["score"] >= 5 else "#cf222e")
             st.markdown(chip(f"{h['score']:.1f}/10", color), unsafe_allow_html=True)
+
+            correct_option = h.get("correct_option")
+            if correct_option:
+                # assertion-reason / MCQ: the correct letter, plus its text
+                # when the option list was stored
+                opt_text = next((o["text"] for o in h.get("options", [])
+                                 if o["key"] == correct_option), "")
+                st.markdown(f"✅ **Correct answer: {correct_option}**"
+                           + (f" — {opt_text}" if opt_text else ""))
+            elif h.get("model_answer"):
+                with st.expander("Model answer / worked solution",
+                                 expanded=not h.get("correct")):
+                    st.markdown(h["model_answer"])
+            if h.get("examiner_expects"):
+                st.caption(f"**Examiner expects:** {h['examiner_expects']}")
+            if h.get("missed"):
+                st.caption("**Missed:** " + ", ".join(h["missed"]))
             if h.get("improvement"):
                 st.caption(h["improvement"])
 
-    if st.button("Retake this topic's quiz", type="primary"):
+    _, next_id = lp.neighbors(topic_id)
+    c1, c2 = st.columns([1, 1])
+    if c1.button("Next topic ▶", type="primary", use_container_width=True,
+                disabled=next_id is None,
+                help="Move on without retaking this topic's quiz"):
+        _open(next_id)
+        st.rerun()
+    if c2.button("Retake this topic's quiz", use_container_width=True):
         state = _state()
         state["retaking"] = True
         state["scores"] = []

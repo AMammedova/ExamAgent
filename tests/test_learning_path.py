@@ -180,6 +180,38 @@ def test_save_qa_persists_prompt_answer_and_score(clean_db) -> None:
     assert history[0]["improvement"] == "Be more precise about X."
 
 
+def test_save_qa_persists_the_correct_answer_for_assertion_reason(clean_db) -> None:
+    """The point of keeping history is being able to see what was actually
+    right, not just the student's own answer - especially on a wrong one."""
+    tid = "backpropagation"
+    q = Question(
+        id="ar1", topic=tid, category=Category.DL,
+        question_type=QuestionType.ASSERTION_REASON, difficulty=5,
+        priority=Priority.CRITICAL, prompt="Assertion... Reason...",
+        correct_option="D",
+        options=[{"key": k, "text": f"option {k}"} for k in "ABCDE"],
+    )
+    ev = Evaluation(score=0.0, correct=False)
+    lp.save_qa(tid, q, "A", ev)
+
+    saved = lp.qa_history(tid)[0]
+    assert saved["correct_option"] == "D"
+    assert {"key": "D", "text": "option D"} in saved["options"]
+
+
+def test_save_qa_persists_the_model_answer_for_open_questions(clean_db) -> None:
+    tid = "pca"
+    q = _question(tid, "Explain why PCA maximises variance.")
+    ev = Evaluation(score=3.0, correct=False, examiner_expects="the eigenvector argument",
+                    missed=["eigenvalues", "orthogonality"])
+    lp.save_qa(tid, q, "not sure", ev)
+
+    saved = lp.qa_history(tid)[0]
+    assert saved["examiner_expects"] == "the eigenvector argument"
+    assert saved["missed"] == ["eigenvalues", "orthogonality"]
+    assert saved["correct_option"] is None
+
+
 def test_qa_history_accumulates_across_calls_in_order(clean_db) -> None:
     tid = "pca"
     for i in range(3):

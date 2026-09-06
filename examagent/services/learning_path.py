@@ -199,17 +199,23 @@ def _qa_key(topic_id: str) -> str:
 def save_qa(topic_id: str, question: Question, answer: str, evaluation: Evaluation) -> None:
     """Persist one answered Learning Path question under its topic, so
     revisiting the topic later - even after an app restart - shows what was
-    asked and how it went, instead of it simply being gone."""
+    asked, how it went, AND what the correct answer actually was - not just
+    the student's own answer and a score."""
     with session_scope() as s:
         history = kv_get(s, _qa_key(topic_id), []) or []
         history.append({
             "prompt": question.prompt,
             "question_type": question.question_type.value,
             "difficulty": question.difficulty,
+            "options": [{"key": o.key, "text": o.text} for o in question.options],
             "answer": answer,
             "score": round(evaluation.score, 1),
             "correct": evaluation.correct,
             "improvement": evaluation.improvement,
+            "correct_option": question.correct_option,
+            "model_answer": evaluation.model_answer or question.model_answer,
+            "examiner_expects": evaluation.examiner_expects,
+            "missed": evaluation.missed,
             "answered_at": datetime.utcnow().isoformat(),
         })
         kv_set(s, _qa_key(topic_id), history[-MAX_QA_PER_TOPIC:])
