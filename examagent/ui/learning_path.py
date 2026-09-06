@@ -201,6 +201,13 @@ def _topic_view(topic_id: str) -> None:
                 progress.record_attempt(q, ev, student_answer=text,
                                         context="learning_path", seconds=100)
                 lp.save_qa(topic_id, q, text, ev)
+                if idx + 1 >= lp.QUESTIONS_PER_TOPIC:
+                    # mark done the moment the last question is actually
+                    # answered, not on a later button click - the free
+                    # Previous/Next-topic buttons above are reachable at any
+                    # time and would otherwise let the student navigate away
+                    # with all questions answered but the topic never marked
+                    lp.mark_complete(topic_id)
                 state["eval"] = ev
                 st.rerun()
         return

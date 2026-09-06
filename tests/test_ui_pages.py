@@ -280,3 +280,46 @@ def test_study_teaching_flow_enforces_active_recall(clean_db) -> None:
     _assert_clean(at, "Study practice step")
     assert at.session_state["study"]["step"] == "practice"
     assert "current_q" in at.session_state["study"], "no practice question was built"
+
+
+def test_learning_path_marks_a_topic_done_right_after_the_last_answer(clean_db) -> None:
+    """Regression: mark_complete used to fire only from the 'Finish topic'
+    button below the quiz. The free 'Previous topic'/'Next topic' buttons
+    above the quiz are reachable at any time, so a student who answered all
+    three questions and then clicked one of those instead of scrolling down
+    to 'Finish topic' would leave the topic with a full qa_history but never
+    marked done. It must now be marked the moment the last answer is scored."""
+    from examagent.models.schemas import Category, Priority, Question, QuestionType
+    from examagent.services import learning_path as lp
+    from examagent.services import progress
+
+    progress.mark_first_run_complete()
+    tid = lp.CURRICULUM[0]
+    q = Question(
+        id="lp-regress-q3", topic=tid, category=Category.ML,
+        question_type=QuestionType.SHORT_ANSWER, difficulty=4,
+        priority=Priority.CRITICAL, prompt="Final question in this topic?",
+    )
+    at = _run("Learning Path", lp_active={
+        "topic_id": tid,
+        "scores": [8.0, 7.0],          # first two questions already answered
+        "q_index": 2,                  # on the third (last) question
+        "q": q,
+        "asked": [q.id],
+        "asked_prompts": [q.prompt],
+    })
+    _assert_clean(at, "Learning Path on the last question")
+    assert lp.completed_topic_ids() == [], "must not be done before answering the last one"
+
+    assert at.text_area, "a short-answer question must offer a text area"
+    at.text_area[0].set_value("A complete answer to the last question.")
+    at = at.run()
+    submit = [b for b in at.button if b.label == "Submit answer"]
+    assert submit, "the last question must still be submittable"
+    at = submit[0].click().run()
+    _assert_clean(at, "Learning Path after submitting the last answer")
+
+    assert tid in lp.completed_topic_ids(), (
+        "the topic must be marked done as soon as the last question is scored, "
+        "not only after a later 'Finish topic' click"
+    )
