@@ -235,3 +235,39 @@ def test_multiple_choice_needs_four_options_and_a_valid_index(clean_db, monkeypa
     assert qg._llm_closed_question("knn", QuestionType.MCQ, 4, None) is None, (
         "a malformed multiple-choice item must be rejected, not padded"
     )
+
+
+# ------------------------------------------- never fall back to a written type
+def test_a_requested_closed_format_that_fails_tries_the_others_before_giving_up(
+    clean_db, monkeypatch,
+):
+    """Regression: observed live in Learning Path on a topic the bank has no
+    facts for (svr). Multiple-response kept failing its verification pass,
+    and the old code fell straight through to an open conceptual question -
+    a format the real paper never uses. It must try True/False and multiple
+    choice via the LLM first."""
+    from examagent.services import question_gen as qg
+
+    def fake_llm_closed(topic_id, qtype, difficulty, retrieval, avoid_prompts=None):
+        if qtype == QuestionType.MULTIPLE_RESPONSE:
+            return None  # simulates a persistent verification-pass rejection
+        return qg.Question(
+            id=f"fake:{qtype.value}", topic=topic_id, category=qg.Category.ML,
+            question_type=qtype, difficulty=difficulty, priority=qg.Priority.MEDIUM,
+            prompt="stub", options=[qg.AnswerOption(key="A", text="a"),
+                                    qg.AnswerOption(key="B", text="b")],
+            correct_option="A",
+        )
+
+    monkeypatch.setattr(qg, "_llm_closed_question", fake_llm_closed)
+    monkeypatch.setattr(qg, "get_llm", lambda: type("F", (), {"available": True})())
+
+    q = qg.generate_question("svr", QuestionType.MULTIPLE_RESPONSE, difficulty=4,
+                             use_llm=True, use_rag=False)
+    assert q.question_type in qg.EXAM_TYPES, (
+        f"must stay closed-form, got {q.question_type.value} - "
+        "the real paper has no written questions"
+    )
+    assert q.question_type != QuestionType.MULTIPLE_RESPONSE, (
+        "the fake was rigged to fail exactly this one"
+    )

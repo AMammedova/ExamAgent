@@ -617,26 +617,25 @@ def _closed_question(topic_id: str, qtype: QuestionType, difficulty: int,
                      avoid_prompts: list[str] | None) -> Question | None:
     """A paper-format item: LLM first for topic-specific wording, then the
     deterministic bank generators, which are exact but limited to the topics
-    the assertion-reason bank covers."""
+    the assertion-reason bank covers.
+
+    The real paper has no written questions, so this must not hand one back
+    just because the *requested* closed format did not pan out for this
+    topic (no bank facts, or a multiple-response item the verification pass
+    rejected) - every other closed format is tried, LLM and bank alike,
+    before this returns None and the caller falls back to a written type.
+    """
     from . import exam_formats
 
-    if use_llm:
-        q = _llm_closed_question(topic_id, qtype,
-                                 difficulty,
-                                 _retrieval(topic_id) if use_rag else None,
-                                 avoid_prompts)
-        if q is not None and q.id not in exclude_ids:
-            return q
-
-    q = exam_formats.build(qtype, topic_id, rng, exclude_ids)
-    if q is not None:
-        return q
-    # this topic cannot support the requested format offline - try the other
-    # closed formats before giving up on the paper's style entirely
-    for alternative in EXAM_TYPES:
-        if alternative == qtype:
-            continue
-        q = exam_formats.build(alternative, topic_id, rng, exclude_ids)
+    retrieval = _retrieval(topic_id) if use_rag else None
+    order = [qtype] + [t for t in EXAM_TYPES if t != qtype]
+    for candidate in order:
+        if use_llm:
+            q = _llm_closed_question(topic_id, candidate, difficulty, retrieval,
+                                     avoid_prompts)
+            if q is not None and q.id not in exclude_ids:
+                return q
+        q = exam_formats.build(candidate, topic_id, rng, exclude_ids)
         if q is not None:
             return q
     return None
