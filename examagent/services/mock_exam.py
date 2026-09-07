@@ -20,30 +20,34 @@ from ..models.schemas import (
     Priority,
     Question,
     QuestionType,
+    points_for,
 )
 from .evaluator import evaluate
 from .progress import record_attempt, weakest_topics
-from .question_gen import generate_question
+from .question_gen import EXAM_TYPES, generate_question
 
 log = get_logger(__name__)
 
-#: Question-type distribution modelled on the university exam samples.
+#: The real paper (AI-CORE-101): each 30-question part is 12 True/False at 1
+#: mark, 9 single-best multiple choice at 3 marks and 9 multiple response at 4
+#: marks - 30 questions, 75 marks per part, 150 marks over the two parts.
 EXAM_BLUEPRINT: list[tuple[QuestionType, int]] = [
-    (QuestionType.ASSERTION_REASON, 5),
-    (QuestionType.CALCULATION, 4),
-    (QuestionType.CONCEPTUAL, 3),
-    (QuestionType.WHAT_IF, 2),
-    (QuestionType.COMPARISON, 2),
-    (QuestionType.SCENARIO, 1),
-    (QuestionType.DIAGRAM, 1),
+    (QuestionType.TRUE_FALSE, 12),
+    (QuestionType.MCQ, 9),
+    (QuestionType.MULTIPLE_RESPONSE, 9),
 ]
 
+#: Same proportions, scaled down for a quick paper.
 SHORT_BLUEPRINT: list[tuple[QuestionType, int]] = [
-    (QuestionType.ASSERTION_REASON, 3),
-    (QuestionType.CALCULATION, 2),
-    (QuestionType.CONCEPTUAL, 2),
-    (QuestionType.WHAT_IF, 1),
+    (QuestionType.TRUE_FALSE, 4),
+    (QuestionType.MCQ, 3),
+    (QuestionType.MULTIPLE_RESPONSE, 3),
 ]
+
+#: Length and time of the real paper, for the "full mock" default.
+FULL_EXAM_QUESTIONS = 60
+FULL_EXAM_MINUTES = 150
+PASS_MARK_FRACTION = 0.60
 
 
 def _select_topics(session, n: int, category: str | None = None,
@@ -132,6 +136,29 @@ def build_exam(
             exclude_ids=seen_ids, seed=rng.randint(1, 10 ** 6),
             recent_ar_keys=ar_keys[-4:], min_difficulty=4,
         )
+        # A paper is defined by its blueprint: if this topic cannot support the
+        # planned format, move along the pool rather than silently swapping in
+        # a different format and changing what the paper is worth. If no topic
+        # in the pool can serve it, take another closed format instead - the
+        # paper stays the paper, in the formats the real one uses.
+        if q.question_type != qtype:
+            wanted = [qtype] + [t for t in EXAM_TYPES if t != qtype]
+            found = None
+            for want in wanted:
+                for offset in range(len(pool)):
+                    other = pool[(i // 2 + offset) % len(pool)]
+                    candidate = generate_question(
+                        other.id, want, difficulty, use_llm=use_llm,
+                        exclude_ids=seen_ids, seed=rng.randint(1, 10 ** 6),
+                        recent_ar_keys=ar_keys[-4:], min_difficulty=4,
+                    )
+                    if candidate.question_type == want:
+                        found = (candidate, other)
+                        break
+                if found:
+                    break
+            if found:
+                q, topic = found
         if q.id in seen_ids:
             q = generate_question(topic.id, qtype, difficulty, use_llm=False,
                                   exclude_ids=seen_ids, seed=rng.randint(1, 10 ** 6),
@@ -224,8 +251,10 @@ def _build_report(
     if not evaluations:
         return MockExamReport(exam_id=exam_id)
 
-    total = sum(ev.score for _, ev in evaluations)
-    maximum = 10.0 * len(evaluations)
+    # marks, weighted the way the paper weights them: 1 for True/False, 3 for
+    # single-best multiple choice, 4 for multiple response
+    total = sum(points_for(q.question_type) * ev.score / 10.0 for q, ev in evaluations)
+    maximum = float(sum(points_for(q.question_type) for q, _ in evaluations))
     pct = 100.0 * total / maximum if maximum else 0.0
 
     def _subset(pred) -> float:
@@ -311,6 +340,8 @@ def _build_report(
         total_score=round(total, 1),
         max_score=maximum,
         percentage=round(pct, 1),
+        pass_mark=round(maximum * PASS_MARK_FRACTION, 1),
+        passed=pct >= PASS_MARK_FRACTION * 100,
         ml_score=ml,
         dl_score=dl,
         by_dimension={k: round(v, 1) for k, v in by_dimension.items()},

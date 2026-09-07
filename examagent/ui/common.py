@@ -18,7 +18,9 @@ DIFFICULTY_LABEL = {
 }
 
 TYPE_LABEL = {
-    QuestionType.MCQ: "Multiple choice",
+    QuestionType.TRUE_FALSE: "True / False · 1 pt",
+    QuestionType.MCQ: "Multiple choice · 3 pts",
+    QuestionType.MULTIPLE_RESPONSE: "Multiple response · 4 pts",
     QuestionType.ASSERTION_REASON: "Assertion & Reason",
     QuestionType.SHORT_ANSWER: "Short answer",
     QuestionType.CALCULATION: "Calculation",
@@ -113,6 +115,21 @@ def render_question(question: Question, key_prefix: str,
 
     if question.question_type == QuestionType.CALCULATION and question.calc_spec:
         return _render_calculation(question, key_prefix, disabled)
+
+    if question.question_type == QuestionType.TRUE_FALSE:
+        choice = st.radio(
+            "Your answer", ["True", "False"], index=None,
+            key=f"{key_prefix}_tf", disabled=disabled, horizontal=True,
+            label_visibility="collapsed",
+        )
+        return choice or ""
+
+    if question.statements:
+        # multiple response: the numbered statements the options combine
+        for i, statement in enumerate(question.statements, 1):
+            st.markdown(f"**{i}.** {statement}")
+        st.caption("Choose the option listing *all* correct statements — "
+                   "all-or-nothing, as on the paper.")
 
     if question.options:
         labels = [f"{o.key}. {o.text}" for o in question.options]

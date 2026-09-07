@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import pytest
 
+from collections import Counter
+
 from examagent.models.db import Attempt, MockExam, get_topic, session_scope
-from examagent.models.schemas import Category, QuestionType
+from examagent.models.schemas import Category, QuestionType, points_for
 from examagent.services import mock_exam, progress
+from examagent.services.question_gen import EXAM_TYPES
 
 
 def _answer_sheet(questions, quality: str = "perfect") -> dict:
@@ -43,10 +46,16 @@ def test_exam_follows_the_blueprint(clean_db) -> None:
     questions = exam["questions"]
     assert len(questions) == 18
 
-    types = {q.question_type for q in questions}
-    assert QuestionType.ASSERTION_REASON in types
-    assert QuestionType.CALCULATION in types
-    assert len(types) >= 4, "the paper must mix question formats"
+    # The paper is closed-form: True/False, single-best MCQ, multiple response.
+    # Offline the bank can run dry for a pooled topic and degrade to a written
+    # question; that is allowed, but must stay marginal - with an LLM every
+    # item is generated in the requested format.
+    closed = [q for q in questions if q.question_type in EXAM_TYPES]
+    assert len(closed) >= 0.85 * len(questions), (
+        f"the paper drifted off the real format: "
+        f"{Counter(q.question_type.value for q in questions)}"
+    )
+    assert len({q.question_type for q in closed}) >= 2, "must mix the closed formats"
 
     # difficulty must be exam level
     assert all(q.difficulty >= 4 for q in questions)
@@ -56,6 +65,44 @@ def test_exam_follows_the_blueprint(clean_db) -> None:
     assert cats == {Category.ML, Category.DL}
 
     assert len({q.id for q in questions}) == len(questions), "no duplicate questions"
+
+
+def test_the_full_paper_matches_the_real_one(clean_db) -> None:
+    """60 questions, 24/18/18 across the three formats, 150 marks, pass at 90."""
+    exam = mock_exam.build_exam(
+        n_questions=mock_exam.FULL_EXAM_QUESTIONS,
+        duration_minutes=mock_exam.FULL_EXAM_MINUTES,
+        use_llm=False, seed=13,
+    )
+    questions = exam["questions"]
+    assert len(questions) == 60
+
+    counts = Counter(q.question_type for q in questions)
+    assert counts[QuestionType.TRUE_FALSE] == 24
+    assert counts[QuestionType.MCQ] == 18
+    assert counts[QuestionType.MULTIPLE_RESPONSE] == 18
+
+    assert sum(points_for(q.question_type) for q in questions) == 150
+    assert Counter(q.category for q in questions)[Category.ML] == 30
+
+    report = mock_exam.submit_exam(
+        exam["exam_id"], {q.id: q.correct_option for q in questions},
+        duration_seconds=9000, use_llm=False,
+    )
+    assert report.max_score == 150
+    assert report.total_score == 150
+    assert report.pass_mark == 90
+    assert report.passed is True
+
+
+def test_a_failing_paper_is_reported_as_below_the_pass_mark(clean_db) -> None:
+    exam = mock_exam.build_exam(n_questions=12, use_llm=False, seed=21)
+    blank = {q.id: "" for q in exam["questions"]}
+    report = mock_exam.submit_exam(exam["exam_id"], blank, duration_seconds=600,
+                                   use_llm=False)
+    assert report.total_score == 0
+    assert report.passed is False
+    assert report.pass_mark == pytest.approx(report.max_score * 0.6)
 
 
 def test_topic_ids_restricts_the_paper_to_that_pool(clean_db) -> None:

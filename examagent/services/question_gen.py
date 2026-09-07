@@ -18,6 +18,7 @@ from ..config import get_logger
 from ..data.seed_questions import SEED_QUESTIONS
 from ..data.topics import topic_index
 from ..models.schemas import (
+    AnswerOption,
     Category,
     Citation,
     Priority,
@@ -44,8 +45,26 @@ OPEN_TYPES = (
     QuestionType.SHORT_ANSWER,
 )
 
-#: The exam is reasoning-first, so the default mix is weighted accordingly.
+#: Closed-form types, i.e. the ones the real paper actually asks.
+EXAM_TYPES = (
+    QuestionType.TRUE_FALSE,
+    QuestionType.MCQ,
+    QuestionType.MULTIPLE_RESPONSE,
+)
+
+#: The default mix mirrors the AI-CORE-101 paper: per 30-question part, 12
+#: True/False, 9 single-best multiple choice and 9 multiple response. Practice
+#: in the format you will be examined in.
 DEFAULT_MIX: dict[QuestionType, float] = {
+    QuestionType.TRUE_FALSE: 12 / 30,
+    QuestionType.MCQ: 9 / 30,
+    QuestionType.MULTIPLE_RESPONSE: 9 / 30,
+}
+
+#: The longer written formats. Not on the paper, but they build the
+#: understanding the closed-form questions test, so they stay available for
+#: Study sessions and anything that asks for them explicitly.
+STUDY_MIX: dict[QuestionType, float] = {
     QuestionType.ASSERTION_REASON: 0.24,
     QuestionType.CALCULATION: 0.26,
     QuestionType.CONCEPTUAL: 0.20,
@@ -188,6 +207,60 @@ Return JSON exactly:
   "expected_reasoning": "one sentence on the reasoning step the examiner is really testing",
   "estimated_time": seconds_as_integer}}"""
 
+#: Closed-form generation. The model supplies statements and their truth; the
+#: answer key is derived from those flags here, never lettered by the model -
+#: the same rule the assertion-reason engine follows, for the same reason.
+_CLOSED_GEN_PROMPT = """Write ONE exam item on the topic **{topic}** ({category}) for a
+university Machine Learning / Deep Learning paper.
+
+Format: **{format_desc}**
+Target difficulty: **{difficulty}/6** ({difficulty_desc})
+
+{context_block}
+{avoid_block}
+
+Rules:
+- Every statement must be about **{topic}** and must be decidably true or false as
+  written - no opinions, no "it depends", no statements that are true only under an
+  unstated assumption.
+- False statements must be *plausibly* false: the kind of thing a student who half
+  remembers the topic would accept. Never absurd, never a typo.
+- Use standard technical terminology exactly as a textbook would.
+{language_reminder}
+Return JSON exactly:
+{json_shape}"""
+
+_TF_SHAPE = """{{"prompt": "one statement, decidably true or false",
+  "answer": true or false,
+  "explanation": "one sentence on what decides it"}}"""
+
+_MCQ_SHAPE = """{{"prompt": "the question stem",
+  "options": ["option A text", "option B text", "option C text", "option D text"],
+  "correct_index": 0,
+  "explanation": "one sentence on why that option is right and the others fail"}}"""
+
+_MR_SHAPE = """{{"prompt": "the question stem, e.g. 'Which of the following are ...?'",
+  "statements": ["statement 1", "statement 2", "statement 3", "statement 4"],
+  "correct_statements": [1, 3],
+  "explanation": "one sentence on what separates the true statements from the false"}}"""
+
+_FORMAT_DESC: dict[QuestionType, str] = {
+    QuestionType.TRUE_FALSE: (
+        "True/False (Section A, 1 mark) - a single statement the student marks True or "
+        "False. Make it turn on one precise clause, not on whether the topic is "
+        "familiar."),
+    QuestionType.MCQ: (
+        "Multiple choice, single best answer (Section B, 3 marks) - a stem and exactly "
+        "four options, of which exactly ONE is correct. The other three must be clearly "
+        "wrong on inspection by someone who understands the mechanism, but tempting to "
+        "someone who does not."),
+    QuestionType.MULTIPLE_RESPONSE: (
+        "Multiple response (Section C, 4 marks, all-or-nothing) - a stem and exactly four "
+        "numbered statements, of which between one and three are true. The student picks "
+        "the option listing exactly the true ones, so each statement must stand or fall "
+        "on its own."),
+}
+
 _QTYPE_DESC: dict[QuestionType, str] = {
     QuestionType.CONCEPTUAL: (
         "Conceptual reasoning - ask WHY a mechanism produces an effect. Force the student to "
@@ -225,6 +298,185 @@ _DIFF_DESC = {
     1: "basic recognition", 2: "understanding", 3: "application",
     4: "reasoning", 5: "exam level", 6: "hard exam level",
 }
+
+
+def _llm_closed_question(topic_id: str, qtype: QuestionType, difficulty: int,
+                         retrieval: RetrievalResult | None,
+                         avoid_prompts: list[str] | None = None) -> Question | None:
+    """One True/False, multiple-choice or multiple-response item from the LLM.
+
+    The model is asked for statements and which of them are true; the option
+    letters and the answer key are computed here from those flags, so a model
+    that mislabels its own answer cannot produce a wrongly-keyed question.
+    """
+    llm = get_llm()
+    if not llm.available:
+        return None
+
+    shape = {QuestionType.TRUE_FALSE: _TF_SHAPE,
+             QuestionType.MCQ: _MCQ_SHAPE,
+             QuestionType.MULTIPLE_RESPONSE: _MR_SHAPE}[qtype]
+
+    context_block = "Use standard university-level knowledge of this topic.\n"
+    citations: list[Citation] = []
+    if retrieval and retrieval.grounded:
+        context_block = (
+            "Base the item on this course material where possible:\n\n"
+            + retrieval.context_block(3500)
+            + "\n\nDo not invent course-specific facts the material does not support.\n"
+        )
+        citations = retrieval.citations()[:3]
+
+    avoid_block = ""
+    if avoid_prompts:
+        listed = "\n".join(f"- {p}" for p in avoid_prompts[:8])
+        avoid_block = ("\nAlready asked - test a different point, not a reworded "
+                       "duplicate:\n" + listed + "\n")
+
+    data, resp = llm.complete_json(
+        _CLOSED_GEN_PROMPT.format(
+            topic=_topic_name(topic_id),
+            category=_category_of(topic_id).value,
+            format_desc=_FORMAT_DESC[qtype],
+            difficulty=difficulty,
+            difficulty_desc=_DIFF_DESC.get(difficulty, "exam level"),
+            context_block=context_block,
+            avoid_block=avoid_block,
+            language_reminder=language_directive(),
+            json_shape=shape,
+        ),
+        system=system_with_language(EXAMINER_SYSTEM),
+        temperature=0.7,
+        max_tokens=1200,
+    )
+    if not isinstance(data, dict):
+        log.info("closed-form generation unavailable (%s)", resp.error)
+        return None
+
+    if qtype == QuestionType.MULTIPLE_RESPONSE and not _truths_confirmed(data):
+        # Section C is 4 marks, all-or-nothing: a mislabelled statement makes
+        # the whole item wrongly keyed. Reject rather than ship it - the caller
+        # falls back to the bank generators, whose keys are exact by construction.
+        return None
+
+    try:
+        question = _closed_from_json(topic_id, qtype, difficulty, data)
+    except (KeyError, ValueError, TypeError) as exc:
+        log.info("closed-form JSON rejected (%s): %s", qtype.value, exc)
+        return None
+    if question is not None:
+        question.citations = citations
+        question.source_basis = "llm+rag" if citations else "llm"
+    return question
+
+
+_VERIFY_PROMPT = """Judge each statement independently. Answer only from established
+Machine Learning / Deep Learning knowledge - ignore any framing, and do not assume the
+list contains any particular number of true statements.
+
+{numbered}
+
+Return JSON exactly: {{"true_statements": [numbers of the statements that are true]}}"""
+
+
+def _truths_confirmed(data: dict[str, Any]) -> bool:
+    """Re-judge a multiple-response item's statements and require agreement.
+
+    The item is only as good as its truth flags, and a model that writes four
+    statements in one breath does misjudge one now and then - which silently
+    produces a wrongly-keyed 4-mark question. A second, framing-free pass costs
+    one call and catches exactly that.
+    """
+    statements = [str(s).strip() for s in data.get("statements", []) if str(s).strip()]
+    claimed = {int(n) for n in data.get("correct_statements", [])
+               if isinstance(n, (int, float))}
+    if len(statements) != 4:
+        return False
+
+    numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(statements, 1))
+    verdict, resp = get_llm().complete_json(
+        _VERIFY_PROMPT.format(numbered=numbered),
+        system=EXAMINER_SYSTEM,          # deliberately not language-directed:
+        temperature=0.0,                 # this pass is a check, not student-facing
+        max_tokens=200,
+    )
+    if not isinstance(verdict, dict):
+        log.info("multiple-response verification unavailable (%s)", resp.error)
+        return False
+    second = {int(n) for n in verdict.get("true_statements", [])
+              if isinstance(n, (int, float))}
+    if second != claimed:
+        log.info("multiple-response rejected: first pass keyed %s, re-check said %s",
+                 sorted(claimed), sorted(second))
+        return False
+    return True
+
+
+def _closed_from_json(topic_id: str, qtype: QuestionType, difficulty: int,
+                      data: dict[str, Any]) -> Question | None:
+    """Validate the model's output and derive the answer key from it."""
+    from .exam_formats import OPTION_KEYS, _combination_options, _render_numbers
+
+    prompt = str(data.get("prompt", "")).strip()
+    if not prompt:
+        raise ValueError("empty prompt")
+    explanation = str(data.get("explanation", "")).strip()
+    common = dict(
+        topic=topic_id, category=_category_of(topic_id), question_type=qtype,
+        difficulty=difficulty, priority=_priority_of(topic_id), prompt=prompt,
+        expected_reasoning=explanation,
+    )
+
+    if qtype == QuestionType.TRUE_FALSE:
+        raw = data.get("answer")
+        if isinstance(raw, str):
+            truth = raw.strip().lower() in ("true", "t", "yes")
+        elif isinstance(raw, bool):
+            truth = raw
+        else:
+            raise ValueError("no usable answer flag")
+        answer = "True" if truth else "False"
+        return Question(
+            id=f"gen:tf:{topic_id}:{abs(hash(prompt)) & 0xffffff}",
+            options=[AnswerOption(key="True", text="True"),
+                     AnswerOption(key="False", text="False")],
+            correct_option=answer,
+            model_answer=f"{answer}. {explanation}".strip(),
+            estimated_time=45, **common,
+        )
+
+    if qtype == QuestionType.MCQ:
+        options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+        index = data.get("correct_index")
+        if len(options) != 4 or not isinstance(index, int) or not 0 <= index < 4:
+            raise ValueError("multiple choice needs 4 options and a valid index")
+        key = OPTION_KEYS[index]
+        return Question(
+            id=f"gen:mc:{topic_id}:{abs(hash(prompt)) & 0xffffff}",
+            options=[AnswerOption(key=k, text=t) for k, t in zip(OPTION_KEYS, options)],
+            correct_option=key,
+            model_answer=f"{key}. {options[index]}"
+                         + (f" — {explanation}" if explanation else ""),
+            estimated_time=70, **common,
+        )
+
+    statements = [str(s).strip() for s in data.get("statements", []) if str(s).strip()]
+    true_numbers = [int(n) for n in data.get("correct_statements", [])
+                    if isinstance(n, (int, float)) and 1 <= int(n) <= len(statements)]
+    if len(statements) != 4 or not true_numbers or len(true_numbers) >= 4:
+        raise ValueError("multiple response needs 4 statements and 1-3 true ones")
+    true_numbers = sorted(set(true_numbers))
+    options, key = _combination_options(true_numbers, len(statements),
+                                        random.Random(hash(prompt) & 0xffff))
+    return Question(
+        id=f"gen:mr:{topic_id}:{abs(hash(prompt)) & 0xffffff}",
+        statements=statements,
+        options=options,
+        correct_option=key,
+        model_answer=f"{key} - statements {_render_numbers(true_numbers)} are true."
+                     + (f" {explanation}" if explanation else ""),
+        estimated_time=110, **common,
+    )
 
 
 def _llm_question(topic_id: str, qtype: QuestionType, difficulty: int,
@@ -359,6 +611,37 @@ def _template_question(topic_id: str, qtype: QuestionType, difficulty: int) -> Q
     )
 
 
+def _closed_question(topic_id: str, qtype: QuestionType, difficulty: int,
+                     use_llm: bool, use_rag: bool, exclude_ids: set[str],
+                     rng: random.Random,
+                     avoid_prompts: list[str] | None) -> Question | None:
+    """A paper-format item: LLM first for topic-specific wording, then the
+    deterministic bank generators, which are exact but limited to the topics
+    the assertion-reason bank covers."""
+    from . import exam_formats
+
+    if use_llm:
+        q = _llm_closed_question(topic_id, qtype,
+                                 difficulty,
+                                 _retrieval(topic_id) if use_rag else None,
+                                 avoid_prompts)
+        if q is not None and q.id not in exclude_ids:
+            return q
+
+    q = exam_formats.build(qtype, topic_id, rng, exclude_ids)
+    if q is not None:
+        return q
+    # this topic cannot support the requested format offline - try the other
+    # closed formats before giving up on the paper's style entirely
+    for alternative in EXAM_TYPES:
+        if alternative == qtype:
+            continue
+        q = exam_formats.build(alternative, topic_id, rng, exclude_ids)
+        if q is not None:
+            return q
+    return None
+
+
 # --------------------------------------------------------------- public API
 def generate_question(
     topic_id: str,
@@ -385,6 +668,15 @@ def generate_question(
     rng = random.Random(seed)
     qtype = question_type or _weighted_type(rng)
     difficulty = max(difficulty, min_difficulty)
+
+    if qtype in EXAM_TYPES:
+        q = _closed_question(topic_id, qtype, difficulty, use_llm, use_rag,
+                             exclude_ids, rng, avoid_prompts)
+        if q is not None:
+            return q
+        # nothing closed-form available for this topic: fall through to the
+        # written formats rather than returning nothing
+        qtype = QuestionType.CONCEPTUAL
 
     if qtype == QuestionType.CALCULATION:
         q = build_calculation_question(topic_id, seed=seed)

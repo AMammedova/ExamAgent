@@ -426,6 +426,50 @@ def evaluate_ar(question: Question, chosen: str) -> Evaluation:
 
 
 # --------------------------------------------------------------- MCQ
+def evaluate_true_false(question: Question, chosen: str) -> Evaluation:
+    """Section A: exact, and worth stating plainly - a near miss is still wrong."""
+    picked = (chosen or "").strip().lower()
+    picked = "True" if picked.startswith("t") else "False" if picked.startswith("f") else ""
+    expected = (question.correct_option or "").strip()
+    correct = bool(picked) and picked == expected
+    return Evaluation(
+        score=10.0 if correct else 0.0,
+        correct=correct,
+        missed=[] if correct else [f"Correct answer: {expected}"],
+        examiner_expects="Read the statement literally - one overstated clause makes a "
+                         "familiar-sounding claim false.",
+        model_answer=question.model_answer,
+        improvement="" if correct else (
+            "Find the exact clause that decides it, then restate the claim correctly."),
+        mistake_type=MistakeType.NONE if correct else MistakeType.CONCEPTUAL,
+        severity="Low" if correct else "Medium",
+        evaluator="deterministic",
+    )
+
+
+def evaluate_multiple_response(question: Question, chosen: str) -> Evaluation:
+    """Section C: all-or-nothing, exactly as the paper marks it."""
+    picked = (chosen or "").strip().upper()[:1]
+    expected = (question.correct_option or "").upper()
+    correct = bool(picked) and picked == expected
+    expected_text = next((o.text for o in question.options if o.key == expected), "")
+    return Evaluation(
+        score=10.0 if correct else 0.0,
+        correct=correct,
+        missed=[] if correct else [
+            f"Correct option: {expected}" + (f" ({expected_text})" if expected_text else "")
+        ],
+        examiner_expects="Decide each numbered statement separately, then pick the option "
+                         "that matches exactly - there is no partial credit here.",
+        model_answer=question.model_answer,
+        improvement="" if correct else (
+            "Mark each statement true or false on its own before looking at the options."),
+        mistake_type=MistakeType.NONE if correct else MistakeType.REASONING,
+        severity="Low" if correct else "High",
+        evaluator="deterministic",
+    )
+
+
 def evaluate_mcq(question: Question, chosen: str) -> Evaluation:
     correct = (chosen or "").strip().upper()[:1] == (question.correct_option or "").upper()
     return Evaluation(
@@ -449,6 +493,8 @@ def evaluate(
 ) -> Evaluation:
     """Evaluate any answer. `answer` is a dict for calculation questions."""
     qt = question.question_type
+    if answer is None:  # an unanswered question is a blank, not a crash
+        answer = ""
 
     if qt == QuestionType.CALCULATION and question.calc_spec:
         answers = answer if isinstance(answer, dict) else _split_free_form(question, str(answer))
@@ -458,6 +504,10 @@ def evaluate(
 
     if qt == QuestionType.ASSERTION_REASON:
         return evaluate_ar(question, text)
+    if qt == QuestionType.TRUE_FALSE:
+        return evaluate_true_false(question, text)
+    if qt == QuestionType.MULTIPLE_RESPONSE:
+        return evaluate_multiple_response(question, text)
     if qt == QuestionType.MCQ:
         return evaluate_mcq(question, text)
 

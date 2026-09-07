@@ -35,7 +35,11 @@ class Category(str, Enum):
 
 
 class QuestionType(str, Enum):
+    # --- the three formats the real paper uses (AI-CORE-101) ---
+    TRUE_FALSE = "true_false"
     MCQ = "multiple_choice"
+    MULTIPLE_RESPONSE = "multiple_response"
+    # --- longer formats: still used for study, not on the paper itself ---
     ASSERTION_REASON = "assertion_reason"
     SHORT_ANSWER = "short_answer"
     CALCULATION = "calculation"
@@ -49,7 +53,9 @@ class QuestionType(str, Enum):
 
 #: which knowledge dimension a question type primarily measures
 DIMENSION_OF_TYPE: dict[QuestionType, str] = {
+    QuestionType.TRUE_FALSE: "concept",
     QuestionType.MCQ: "concept",
+    QuestionType.MULTIPLE_RESPONSE: "reasoning",
     QuestionType.ASSERTION_REASON: "reasoning",
     QuestionType.SHORT_ANSWER: "concept",
     QuestionType.CALCULATION: "calculation",
@@ -62,6 +68,19 @@ DIMENSION_OF_TYPE: dict[QuestionType, str] = {
 }
 
 DIMENSIONS = ("concept", "calculation", "reasoning", "comparison", "application")
+
+#: Marks each format carries on the real paper: True/False 1 pt, single-best
+#: multiple choice 3 pts, multiple response 4 pts (all-or-nothing). Anything
+#: not on the paper is scored as a 3-pointer for weighting purposes.
+EXAM_POINTS: dict[QuestionType, int] = {
+    QuestionType.TRUE_FALSE: 1,
+    QuestionType.MCQ: 3,
+    QuestionType.MULTIPLE_RESPONSE: 4,
+}
+
+
+def points_for(question_type: QuestionType) -> int:
+    return EXAM_POINTS.get(question_type, 3)
 
 
 class Mastery(str, Enum):
@@ -195,6 +214,9 @@ class Question(BaseModel):
     priority: Priority = Priority.HIGH
     prompt: str
     options: list[AnswerOption] = Field(default_factory=list)
+    #: multiple-response only: the numbered statements the options combine,
+    #: e.g. ["Predicting house prices...", "Grouping customers...", ...]
+    statements: list[str] = Field(default_factory=list)
     correct_option: str | None = None
     model_answer: str = ""
     expected_concepts: list[str] = Field(default_factory=list)
@@ -288,9 +310,12 @@ class ReadinessBreakdown(BaseModel):
 
 class MockExamReport(BaseModel):
     exam_id: int
+    #: marks, weighted as the real paper weights them (1 / 3 / 4 per format)
     total_score: float = 0.0
     max_score: float = 0.0
     percentage: float = 0.0
+    pass_mark: float = 0.0
+    passed: bool = False
     ml_score: float = 0.0
     dl_score: float = 0.0
     by_dimension: dict[str, float] = Field(default_factory=dict)

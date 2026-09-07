@@ -73,13 +73,37 @@ def _render_setup(state: dict[str, Any]) -> None:
     st.caption("Real conditions: a clock, no hints, no feedback until you submit.")
     llm_badge()
 
+    with st.container(border=True):
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.markdown("🎓 **Full paper — the real thing**")
+            st.caption(f"{mock_exam.FULL_EXAM_QUESTIONS} questions · 150 marks · "
+                      f"{mock_exam.FULL_EXAM_MINUTES} minutes · pass at 90 (60%). "
+                      "Two symmetric parts, ML then DL: 12 True/False (1 pt), "
+                      "9 multiple choice (3 pts), 9 multiple response (4 pts) each.")
+        if c2.button("Sit the full paper", type="primary", use_container_width=True,
+                    key="full_paper"):
+            with st.spinner("Building 60 questions… this takes a moment."):
+                exam = mock_exam.build_exam(
+                    n_questions=mock_exam.FULL_EXAM_QUESTIONS,
+                    duration_minutes=mock_exam.FULL_EXAM_MINUTES,
+                    label="Full mock — AI-CORE-101 format",
+                    use_llm=bool(st.session_state.get("use_llm", True)),
+                    balance_ml_dl=True,
+                )
+            state["exam"] = exam
+            state["answers"] = {}
+            state["started_at"] = time.time()
+            state["index"] = 0
+            st.rerun()
+
     _quick_mock_from_learning_path(state)
 
     st.divider()
     st.markdown("#### Custom exam")
     c1, c2, c3 = st.columns(3)
     with c1:
-        n = st.slider("Questions", 6, 30, 18)
+        n = st.slider("Questions", 6, 60, 18)
     with c2:
         minutes = st.slider("Time limit (minutes)", 15, 180, 75)
     with c3:
@@ -87,9 +111,9 @@ def _render_setup(state: dict[str, Any]) -> None:
 
     balance = st.checkbox("Balance Machine Learning and Deep Learning", value=True)
     st.caption(
-        "Blueprint follows the university exam samples: assertion-reason, calculation, "
-        "conceptual reasoning, what-happens-if, comparison, scenario and architecture "
-        "interpretation, at difficulty 4-6."
+        "Same blueprint as the real paper, scaled to the length you pick: True/False "
+        "(1 pt), single-best multiple choice (3 pts) and multiple response (4 pts, "
+        "all-or-nothing), at difficulty 4-6."
     )
 
     if st.button("Generate exam", type="primary"):
@@ -245,9 +269,19 @@ def _render_report(state: dict[str, Any]) -> None:
             f"{report.percentage:.0f}%</div><div class='ea-muted'>overall</div>",
             unsafe_allow_html=True,
         )
-    c2.metric("Raw score", f"{report.total_score:.1f}/{report.max_score:.0f}")
+    c2.metric("Marks", f"{report.total_score:.0f}/{report.max_score:.0f}")
     c3.metric("Machine Learning", f"{report.ml_score:.0f}%")
     c4.metric("Deep Learning", f"{report.dl_score:.0f}%")
+
+    if report.pass_mark:
+        if report.passed:
+            st.success(f"**Pass** — {report.total_score:.0f}/{report.max_score:.0f}, "
+                      f"above the {report.pass_mark:.0f} mark pass line (60%).")
+        else:
+            short = report.pass_mark - report.total_score
+            st.error(f"**Below the pass mark** — {report.total_score:.0f}/"
+                    f"{report.max_score:.0f}, {short:.0f} marks short of "
+                    f"{report.pass_mark:.0f} (60%).")
 
     if report.duration_seconds:
         st.caption(f"Completed in {report.duration_seconds // 60} minutes")

@@ -4,17 +4,19 @@ topic to search for - the whole page is one button and one list.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import streamlit as st
 
 from ..models.db import all_topics, session_scope
 from ..services import learning_path as lp
-from ..services import progress, tutor
+from ..services import mock_exam, progress, tutor
 from ..services.evaluator import evaluate
 from ..services.question_gen import generate_question
 from .common import (
     chip,
+    go_to,
     priority_color,
     render_citations,
     render_evaluation,
@@ -58,6 +60,8 @@ def render() -> None:
             st.session_state.pop(STATE, None)
             st.rerun()
 
+    _exam_so_far(over)
+
     if over["finished"]:
         st.success(
             "Every topic has been learned or skipped. Time for a **Mock Exam** — "
@@ -79,6 +83,40 @@ def render() -> None:
     st.divider()
     with st.expander("Full path", expanded=False):
         _list_view()
+
+
+def _exam_so_far(over: dict[str, Any]) -> None:
+    """Sit an exam in the real paper's format, covering only what has been
+    learned so far - the whole point of a path is being able to stop anywhere
+    and test what you have."""
+    done_ids = lp.completed_topic_ids()
+    if not done_ids:
+        st.caption("Finish a topic and you'll be able to sit a paper on what you've "
+                   "covered so far.")
+        return
+
+    # roughly one question per topic per format, capped at the real paper's length
+    n = max(6, min(mock_exam.FULL_EXAM_QUESTIONS, len(done_ids) * 3))
+    minutes = max(10, round(n * 2.5))
+    with st.container(border=True):
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.markdown(f"📝 **Exam on what I've learned so far** — {len(done_ids)} topic"
+                       + ("s" if len(done_ids) != 1 else "") + " covered")
+            st.caption(f"Real paper format: True/False (1 pt), multiple choice (3 pts), "
+                      f"multiple response (4 pts). ~{n} questions, ~{minutes} min.")
+        if c2.button("Sit the exam", type="primary", use_container_width=True,
+                    key="lp_exam_so_far"):
+            with st.spinner("Building the paper…"):
+                exam = mock_exam.build_exam(
+                    n_questions=n, duration_minutes=minutes,
+                    label=f"Learning Path — first {len(done_ids)} topics",
+                    use_llm=_use_llm(), balance_ml_dl=True, topic_ids=done_ids,
+                )
+            st.session_state["mock"] = {
+                "exam": exam, "answers": {}, "started_at": time.time(), "index": 0,
+            }
+            go_to("Mock Exam")
 
 
 def _list_view() -> None:
