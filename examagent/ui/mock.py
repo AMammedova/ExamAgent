@@ -25,6 +25,17 @@ def _state() -> dict[str, Any]:
     return st.session_state.setdefault(STATE, {})
 
 
+def _progress_bar(total_hint: int):
+    """A progress bar wired to build_exam's callback, so a long paper shows
+    real movement instead of an indefinite spinner."""
+    bar = st.progress(0.0, text=f"Building {total_hint} questions…")
+
+    def tick(done: int, total: int) -> None:
+        bar.progress(done / total, text=f"Building the paper… {done}/{total}")
+
+    return bar, tick
+
+
 def _quick_mock_from_learning_path(state: dict[str, Any]) -> None:
     """One-click exam scoped to only the topics done in the Learning Path -
     for testing yourself on what you've actually covered, not the full
@@ -41,13 +52,14 @@ def _quick_mock_from_learning_path(state: dict[str, Any]) -> None:
         st.caption(f"Only from topics you've already learned. ~{n} questions, "
                   f"~{minutes} min.")
         if st.button("Generate quick mock", type="primary", key="quick_mock_lp"):
-            with st.spinner("Building the paper…"):
-                exam = mock_exam.build_exam(
-                    n_questions=n, duration_minutes=minutes,
-                    label="Quick Mock — Learning Path",
-                    use_llm=bool(st.session_state.get("use_llm", True)),
-                    balance_ml_dl=True, topic_ids=done_ids,
-                )
+            bar, tick = _progress_bar(n)
+            exam = mock_exam.build_exam(
+                n_questions=n, duration_minutes=minutes,
+                label="Quick Mock — Learning Path",
+                use_llm=bool(st.session_state.get("use_llm", True)),
+                balance_ml_dl=True, topic_ids=done_ids, on_progress=tick,
+            )
+            bar.empty()
             state["exam"] = exam
             state["answers"] = {}
             state["started_at"] = time.time()
@@ -83,14 +95,15 @@ def _render_setup(state: dict[str, Any]) -> None:
                       "9 multiple choice (3 pts), 9 multiple response (4 pts) each.")
         if c2.button("Sit the full paper", type="primary", use_container_width=True,
                     key="full_paper"):
-            with st.spinner("Building 60 questions… this takes a moment."):
-                exam = mock_exam.build_exam(
-                    n_questions=mock_exam.FULL_EXAM_QUESTIONS,
-                    duration_minutes=mock_exam.FULL_EXAM_MINUTES,
-                    label="Full mock — AI-CORE-101 format",
-                    use_llm=bool(st.session_state.get("use_llm", True)),
-                    balance_ml_dl=True,
-                )
+            bar, tick = _progress_bar(mock_exam.FULL_EXAM_QUESTIONS)
+            exam = mock_exam.build_exam(
+                n_questions=mock_exam.FULL_EXAM_QUESTIONS,
+                duration_minutes=mock_exam.FULL_EXAM_MINUTES,
+                label="Full mock — AI-CORE-101 format",
+                use_llm=bool(st.session_state.get("use_llm", True)),
+                balance_ml_dl=True, on_progress=tick,
+            )
+            bar.empty()
             state["exam"] = exam
             state["answers"] = {}
             state["started_at"] = time.time()
@@ -117,12 +130,13 @@ def _render_setup(state: dict[str, Any]) -> None:
     )
 
     if st.button("Generate exam", type="primary"):
-        with st.spinner("Building the paper… (calculation problems are generated fresh)"):
-            exam = mock_exam.build_exam(
-                n_questions=n, duration_minutes=minutes, label=label,
-                use_llm=bool(st.session_state.get("use_llm", True)),
-                balance_ml_dl=balance,
-            )
+        bar, tick = _progress_bar(n)
+        exam = mock_exam.build_exam(
+            n_questions=n, duration_minutes=minutes, label=label,
+            use_llm=bool(st.session_state.get("use_llm", True)),
+            balance_ml_dl=balance, on_progress=tick,
+        )
+        bar.empty()
         state["exam"] = exam
         state["answers"] = {}
         state["started_at"] = time.time()

@@ -7,8 +7,9 @@ scored only after submission.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from ..config import get_logger
 from ..models.db import MockExam, Topic, all_topics, session_scope
@@ -92,12 +93,17 @@ def build_exam(
     balance_ml_dl: bool = True,
     seed: int | None = None,
     topic_ids: list[str] | None = None,
+    max_workers: int = 8,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Generate a full paper and persist it.
 
     `topic_ids`, when given, restricts every question to that set of topics -
     e.g. a quick mock scoped to only what the Learning Path has covered so
     far, rather than the full syllabus.
+
+    `on_progress(done, total)` is called as questions land, so the caller can
+    show real movement rather than an indefinite spinner.
     """
     import random
 
@@ -122,50 +128,75 @@ def build_exam(
         else:
             ml_topics = dl_topics = _select_topics(s, n_questions, allowed_ids=allowed_ids)
 
-    questions: list[Question] = []
-    seen_ids: set[str] = set()
-    ar_keys: list[str] = []
+    # One task per question, then generated concurrently: each item is an
+    # independent LLM round trip, and a 60-question paper done one at a time
+    # keeps the student staring at a spinner for minutes.
+    tasks: list[tuple[int, QuestionType, Any, int, int]] = []
     for i, qtype in enumerate(plan):
         pool = (ml_topics if i % 2 == 0 else dl_topics) or ml_topics or dl_topics
         if not pool:
             break
+        tasks.append((i, qtype, pool, rng.choice([4, 5, 5, 6]), rng.randint(1, 10 ** 6)))
+
+    def _build_one(task: tuple[int, QuestionType, Any, int, int]) -> tuple[int, Question]:
+        i, qtype, pool, difficulty, qseed = task
         topic = pool[(i // 2) % len(pool)]
-        difficulty = rng.choice([4, 5, 5, 6])
-        q = generate_question(
-            topic.id, qtype, difficulty, use_llm=use_llm,
-            exclude_ids=seen_ids, seed=rng.randint(1, 10 ** 6),
-            recent_ar_keys=ar_keys[-4:], min_difficulty=4,
-        )
-        # A paper is defined by its blueprint: if this topic cannot support the
-        # planned format, move along the pool rather than silently swapping in
-        # a different format and changing what the paper is worth. If no topic
-        # in the pool can serve it, take another closed format instead - the
-        # paper stays the paper, in the formats the real one uses.
+        q = generate_question(topic.id, qtype, difficulty, use_llm=use_llm,
+                              seed=qseed, min_difficulty=4)
+        # A paper is defined by its blueprint - 150 marks only add up if the
+        # planned format actually lands. `generate_question` already tries
+        # every closed format for one topic, so if the planned one still did
+        # not come out, try neighbouring topics: a couple through the LLM
+        # (each is a round trip, so this stays capped), then the whole pool
+        # through the bank, which costs nothing but a dictionary lookup.
         if q.question_type != qtype:
-            wanted = [qtype] + [t for t in EXAM_TYPES if t != qtype]
-            found = None
-            for want in wanted:
-                for offset in range(len(pool)):
+            if use_llm:
+                for offset in (1, 2):
                     other = pool[(i // 2 + offset) % len(pool)]
-                    candidate = generate_question(
-                        other.id, want, difficulty, use_llm=use_llm,
-                        exclude_ids=seen_ids, seed=rng.randint(1, 10 ** 6),
-                        recent_ar_keys=ar_keys[-4:], min_difficulty=4,
-                    )
-                    if candidate.question_type == want:
-                        found = (candidate, other)
-                        break
-                if found:
-                    break
-            if found:
-                q, topic = found
+                    candidate = generate_question(other.id, qtype, difficulty,
+                                                  use_llm=True, seed=qseed + offset,
+                                                  min_difficulty=4)
+                    if candidate.question_type == qtype:
+                        return i, candidate
+            for offset in range(len(pool)):
+                other = pool[(i // 2 + offset) % len(pool)]
+                candidate = generate_question(other.id, qtype, difficulty,
+                                              use_llm=False, seed=qseed + offset,
+                                              min_difficulty=4)
+                if candidate.question_type == qtype:
+                    return i, candidate
+        return i, q
+
+    results: dict[int, Question] = {}
+    if tasks:
+        workers = max(1, min(max_workers, len(tasks)))
+        with ThreadPoolExecutor(max_workers=workers) as pool_exec:
+            futures = [pool_exec.submit(_build_one, t) for t in tasks]
+            for done, future in enumerate(as_completed(futures), 1):
+                try:
+                    i, q = future.result()
+                    results[i] = q
+                except Exception as exc:  # one bad item must not sink the paper
+                    log.warning("question generation failed: %s", exc)
+                if on_progress is not None:
+                    on_progress(done, len(futures))
+
+    # de-duplicate in paper order; a collision is replaced offline, which is
+    # instant and cannot collide again on the same content
+    questions: list[Question] = []
+    seen_ids: set[str] = set()
+    for i, _qtype, pool, difficulty, qseed in tasks:
+        q = results.get(i)
+        if q is None:
+            continue
         if q.id in seen_ids:
-            q = generate_question(topic.id, qtype, difficulty, use_llm=False,
-                                  exclude_ids=seen_ids, seed=rng.randint(1, 10 ** 6),
-                                  recent_ar_keys=ar_keys[-4:], min_difficulty=4)
+            topic = pool[(i // 2) % len(pool)]
+            q = generate_question(topic.id, q.question_type, difficulty,
+                                  use_llm=False, exclude_ids=seen_ids,
+                                  seed=qseed + 977, min_difficulty=4)
+            if q.id in seen_ids:
+                continue
         seen_ids.add(q.id)
-        if q.question_type == QuestionType.ASSERTION_REASON and q.correct_option:
-            ar_keys.append(q.correct_option)
         questions.append(q)
 
     with session_scope() as s:

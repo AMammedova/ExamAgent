@@ -95,24 +95,35 @@ def _exam_so_far(over: dict[str, Any]) -> None:
                    "covered so far.")
         return
 
-    # roughly one question per topic per format, capped at the real paper's length
-    n = max(6, min(mock_exam.FULL_EXAM_QUESTIONS, len(done_ids) * 3))
-    minutes = max(10, round(n * 2.5))
+    default_n = max(6, min(30, len(done_ids) * 2))
     with st.container(border=True):
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            st.markdown(f"📝 **Exam on what I've learned so far** — {len(done_ids)} topic"
-                       + ("s" if len(done_ids) != 1 else "") + " covered")
-            st.caption(f"Real paper format: True/False (1 pt), multiple choice (3 pts), "
-                      f"multiple response (4 pts). ~{n} questions, ~{minutes} min.")
-        if c2.button("Sit the exam", type="primary", use_container_width=True,
+        st.markdown(f"📝 **Exam on what I've learned so far** — {len(done_ids)} topic"
+                   + ("s" if len(done_ids) != 1 else "") + " covered")
+        st.caption("Real paper format: True/False (1 pt), multiple choice (3 pts), "
+                   "multiple response (4 pts), marked out of the same 60% pass line.")
+
+        c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
+        n = c1.number_input("Questions", min_value=5,
+                           max_value=mock_exam.FULL_EXAM_QUESTIONS,
+                           value=default_n, step=5, key="lp_exam_n")
+        minutes = c2.number_input("Minutes", min_value=5, max_value=180,
+                                 value=int(max(10, round(n * 2.5))), step=5,
+                                 key="lp_exam_minutes")
+        c3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if c3.button("Sit the exam", type="primary", use_container_width=True,
                     key="lp_exam_so_far"):
-            with st.spinner("Building the paper…"):
-                exam = mock_exam.build_exam(
-                    n_questions=n, duration_minutes=minutes,
-                    label=f"Learning Path — first {len(done_ids)} topics",
-                    use_llm=_use_llm(), balance_ml_dl=True, topic_ids=done_ids,
-                )
+            bar = st.progress(0.0, text=f"Building {n} questions…")
+
+            def _tick(done: int, total: int) -> None:
+                bar.progress(done / total, text=f"Building the paper… {done}/{total}")
+
+            exam = mock_exam.build_exam(
+                n_questions=int(n), duration_minutes=int(minutes),
+                label=f"Learning Path — first {len(done_ids)} topics",
+                use_llm=_use_llm(), balance_ml_dl=True, topic_ids=done_ids,
+                on_progress=_tick,
+            )
+            bar.empty()
             st.session_state["mock"] = {
                 "exam": exam, "answers": {}, "started_at": time.time(), "index": 0,
             }
