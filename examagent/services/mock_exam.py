@@ -85,6 +85,63 @@ def _select_topics(session, n: int, category: str | None = None,
     return out[:n] or topics[:n]
 
 
+#: The paper's own running order: Part 1 is Machine Learning, Part 2 Deep
+#: Learning, and inside each part the sections run A (True/False), B (multiple
+#: choice), C (multiple response). Questions are not shuffled across sections -
+#: sitting them in the paper's order is part of practising the paper.
+SECTION_LETTERS = {
+    QuestionType.TRUE_FALSE: "A",
+    QuestionType.MCQ: "B",
+    QuestionType.MULTIPLE_RESPONSE: "C",
+}
+SECTION_TITLES = {
+    QuestionType.TRUE_FALSE: "True / False",
+    QuestionType.MCQ: "Multiple Choice",
+    QuestionType.MULTIPLE_RESPONSE: "Multiple Response",
+}
+
+
+def _section_counts(n_in_part: int) -> list[tuple[QuestionType, int]]:
+    """Split one part's questions across its three sections, in the paper's
+    12 / 9 / 9 proportion, always totalling exactly `n_in_part`."""
+    blueprint = EXAM_BLUEPRINT if n_in_part >= 7 else SHORT_BLUEPRINT
+    total_bp = sum(c for _, c in blueprint)
+    counts = [(qtype, max(1, round(c * n_in_part / total_bp)))
+              for qtype, c in blueprint]
+
+    # rounding rarely lands on the target; settle the difference on Section A,
+    # which is the largest and the cheapest to add to
+    drift = n_in_part - sum(c for _, c in counts)
+    while drift:
+        step = 1 if drift > 0 else -1
+        for idx, (qtype, c) in enumerate(counts):
+            if c + step >= 1:
+                counts[idx] = (qtype, c + step)
+                drift -= step
+                break
+        else:  # pragma: no cover - every section already at its floor
+            break
+    return counts
+
+
+def _paper_plan(n_questions: int, balance_ml_dl: bool,
+                has_ml: bool, has_dl: bool) -> list[tuple[Category, QuestionType]]:
+    """Every question of the paper, in the order it is sat."""
+    parts: list[tuple[Category, int]]
+    if balance_ml_dl and has_ml and has_dl:
+        ml_share = n_questions // 2 + n_questions % 2
+        parts = [(Category.ML, ml_share), (Category.DL, n_questions - ml_share)]
+    else:
+        only = Category.ML if has_ml or not has_dl else Category.DL
+        parts = [(only, n_questions)]
+
+    plan: list[tuple[Category, QuestionType]] = []
+    for category, count in parts:
+        for qtype, section_count in _section_counts(count):
+            plan.extend([(category, qtype)] * section_count)
+    return plan[:n_questions]
+
+
 def build_exam(
     n_questions: int = 18,
     duration_minutes: int = 75,
@@ -108,18 +165,7 @@ def build_exam(
     import random
 
     rng = random.Random(seed)
-    blueprint = EXAM_BLUEPRINT if n_questions >= 14 else SHORT_BLUEPRINT
     allowed_ids = set(topic_ids) if topic_ids else None
-
-    # scale the blueprint to the requested length
-    total_bp = sum(c for _, c in blueprint)
-    plan: list[QuestionType] = []
-    for qtype, count in blueprint:
-        plan.extend([qtype] * max(1, round(count * n_questions / total_bp)))
-    plan = plan[:n_questions]
-    while len(plan) < n_questions:
-        plan.append(QuestionType.CONCEPTUAL)
-    rng.shuffle(plan)
 
     with session_scope() as s:
         if balance_ml_dl:
@@ -128,12 +174,16 @@ def build_exam(
         else:
             ml_topics = dl_topics = _select_topics(s, n_questions, allowed_ids=allowed_ids)
 
+    plan = _paper_plan(n_questions, balance_ml_dl,
+                       has_ml=bool(ml_topics), has_dl=bool(dl_topics))
+
     # One task per question, then generated concurrently: each item is an
     # independent LLM round trip, and a 60-question paper done one at a time
     # keeps the student staring at a spinner for minutes.
     tasks: list[tuple[int, QuestionType, Any, int, int]] = []
-    for i, qtype in enumerate(plan):
-        pool = (ml_topics if i % 2 == 0 else dl_topics) or ml_topics or dl_topics
+    for i, (category, qtype) in enumerate(plan):
+        pool = (ml_topics if category == Category.ML else dl_topics) \
+            or ml_topics or dl_topics
         if not pool:
             break
         tasks.append((i, qtype, pool, rng.choice([4, 5, 5, 6]), rng.randint(1, 10 ** 6)))
@@ -181,21 +231,27 @@ def build_exam(
                 if on_progress is not None:
                     on_progress(done, len(futures))
 
-    # de-duplicate in paper order; a collision is replaced offline, which is
-    # instant and cannot collide again on the same content
+    # Walk the paper in order and settle two things the parallel pass cannot:
+    # duplicates (workers cannot share a growing exclude set) and slots whose
+    # planned section format did not come out. Both are repaired against the
+    # bank, which is instant and exact - a section is only as real as the
+    # questions actually sitting in it.
     questions: list[Question] = []
     seen_ids: set[str] = set()
-    for i, _qtype, pool, difficulty, qseed in tasks:
+    for i, qtype, pool, difficulty, qseed in tasks:
         q = results.get(i)
-        if q is None:
+        if q is None or q.id in seen_ids or q.question_type != qtype:
+            for offset in range(len(pool)):
+                other = pool[(i // 2 + offset) % len(pool)]
+                candidate = generate_question(other.id, qtype, difficulty,
+                                              use_llm=False, exclude_ids=seen_ids,
+                                              seed=qseed + offset + 977,
+                                              min_difficulty=4)
+                if candidate.question_type == qtype and candidate.id not in seen_ids:
+                    q = candidate
+                    break
+        if q is None or q.id in seen_ids:
             continue
-        if q.id in seen_ids:
-            topic = pool[(i // 2) % len(pool)]
-            q = generate_question(topic.id, q.question_type, difficulty,
-                                  use_llm=False, exclude_ids=seen_ids,
-                                  seed=qseed + 977, min_difficulty=4)
-            if q.id in seen_ids:
-                continue
         seen_ids.add(q.id)
         questions.append(q)
 

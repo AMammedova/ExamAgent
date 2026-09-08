@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 from typing import Any, Sequence
 
-from ..config import get_logger
+from ..config import get_logger, get_settings
 from ..data.seed_questions import SEED_QUESTIONS
 from ..data.topics import topic_index
 from ..models.schemas import (
@@ -29,7 +29,13 @@ from ..models.schemas import (
 from . import rag
 from .assertion_engine import generate_assertion_reason
 from .calc_engine import generate_problem, topic_has_calculation
-from .llm import EXAMINER_SYSTEM, get_llm, language_directive, system_with_language
+from .llm import (
+    EXAMINER_SYSTEM,
+    LANGUAGE_NAMES,
+    get_llm,
+    language_directive,
+    system_with_language,
+)
 
 log = get_logger(__name__)
 
@@ -226,9 +232,49 @@ Rules:
 - False statements must be *plausibly* false: the kind of thing a student who half
   remembers the topic would accept. Never absurd, never a typo.
 - Use standard technical terminology exactly as a textbook would.
-{language_reminder}
+{sentence_language}{language_reminder}
 Return JSON exactly:
 {json_shape}"""
+
+#: A closed-form item is one short technical sentence, and a model told to keep
+#: technical terms in English will happily decide the whole sentence qualifies.
+#: This spells out where the line actually falls.
+_SENTENCE_LANGUAGE = """- Write the stem and every statement in {language}. Only the
+  technical *names* stay in English (Linear Regression, closed-form solution, gradient
+  descent, overfitting); the sentence around them - verbs, connectives, qualifiers,
+  quantifiers like "always"/"never" - must be {language}. A statement written entirely
+  in English is a failed item, however technical it is.
+"""
+
+_LANGUAGE_RETRY = """
+
+Your previous attempt came back in English. Write it again in {language}: keep the
+technical names as they are, but the sentences themselves must be {language}."""
+
+#: Letters and short function words that only appear in these languages, used to
+#: tell "written in the target language" from "written in English with a few
+#: technical terms" without shipping a language-detection dependency.
+_LANGUAGE_MARKERS: dict[str, tuple[str, ...]] = {
+    "az": ("ə", "ı", "ğ", "ş", "ç", "ö", "ü",
+           " və ", " üçün ", " deyil", " olan ", " edir", " hansı", " ilə ", " isə "),
+}
+
+
+def _written_in(data: dict[str, Any], language: str) -> bool:
+    """Whether the generated item is actually in the configured language.
+
+    English is the baseline and always passes; so does a language we have no
+    markers for - a check we cannot make must not reject good output.
+    """
+    markers = _LANGUAGE_MARKERS.get(language)
+    if language == "en" or not markers:
+        return True
+    text = " ".join([
+        str(data.get("prompt", "")),
+        *[str(s) for s in data.get("statements", [])],
+        *[str(o) for o in data.get("options", [])],
+    ]).lower()
+    return any(marker in text for marker in markers)
 
 _TF_SHAPE = """{{"prompt": "one statement, decidably true or false",
   "answer": true or false,
@@ -333,24 +379,45 @@ def _llm_closed_question(topic_id: str, qtype: QuestionType, difficulty: int,
         avoid_block = ("\nAlready asked - test a different point, not a reworded "
                        "duplicate:\n" + listed + "\n")
 
-    data, resp = llm.complete_json(
-        _CLOSED_GEN_PROMPT.format(
-            topic=_topic_name(topic_id),
-            category=_category_of(topic_id).value,
-            format_desc=_FORMAT_DESC[qtype],
-            difficulty=difficulty,
-            difficulty_desc=_DIFF_DESC.get(difficulty, "exam level"),
-            context_block=context_block,
-            avoid_block=avoid_block,
-            language_reminder=language_directive(),
-            json_shape=shape,
-        ),
-        system=system_with_language(EXAMINER_SYSTEM),
-        temperature=0.7,
-        max_tokens=1200,
+    language = (get_settings().language or "en").strip().lower()
+    sentence_language = ""
+    if language != "en":
+        sentence_language = _SENTENCE_LANGUAGE.format(
+            language=LANGUAGE_NAMES.get(language, language))
+
+    prompt = _CLOSED_GEN_PROMPT.format(
+        topic=_topic_name(topic_id),
+        category=_category_of(topic_id).value,
+        format_desc=_FORMAT_DESC[qtype],
+        difficulty=difficulty,
+        difficulty_desc=_DIFF_DESC.get(difficulty, "exam level"),
+        context_block=context_block,
+        avoid_block=avoid_block,
+        sentence_language=sentence_language,
+        language_reminder=language_directive(),
+        json_shape=shape,
     )
+
+    data = None
+    for attempt in range(2):
+        data, resp = llm.complete_json(
+            prompt if attempt == 0 else prompt + _LANGUAGE_RETRY.format(
+                language=LANGUAGE_NAMES.get(language, language)),
+            system=system_with_language(EXAMINER_SYSTEM),
+            temperature=0.7,
+            max_tokens=1200,
+        )
+        if not isinstance(data, dict):
+            log.info("closed-form generation unavailable (%s)", resp.error)
+            return None
+        if _written_in(data, language):
+            break
+        # A one-sentence technical claim is exactly where the language
+        # instruction slips: the model decides the whole sentence is a term of
+        # art and answers in English. Say so explicitly and ask once more.
+        log.info("closed-form item came back in English despite language=%s; retrying",
+                 language)
     if not isinstance(data, dict):
-        log.info("closed-form generation unavailable (%s)", resp.error)
         return None
 
     if qtype == QuestionType.MULTIPLE_RESPONSE and not _truths_confirmed(data):

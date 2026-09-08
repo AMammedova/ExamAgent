@@ -268,3 +268,48 @@ def test_ml_dl_scores_are_reported_separately(clean_db) -> None:
 def test_unknown_exam_id_raises(clean_db) -> None:
     with pytest.raises(ValueError):
         mock_exam.submit_exam(999999, {}, use_llm=False)
+
+
+def test_the_paper_runs_in_the_printed_order(clean_db) -> None:
+    """Part 1 is Machine Learning, Part 2 Deep Learning, and inside each part
+    the sections run A (True/False), B (multiple choice), C (multiple
+    response) - not shuffled. Sitting them in the paper's order is part of
+    practising the paper."""
+    exam = mock_exam.build_exam(n_questions=60, duration_minutes=150,
+                                use_llm=False, seed=13)
+    questions = exam["questions"]
+
+    # the running order, collapsed to one entry per (part, section) block
+    blocks = []
+    for q in questions:
+        key = (q.category, q.question_type)
+        if not blocks or blocks[-1] != key:
+            blocks.append(key)
+
+    assert blocks == [
+        (Category.ML, QuestionType.TRUE_FALSE),
+        (Category.ML, QuestionType.MCQ),
+        (Category.ML, QuestionType.MULTIPLE_RESPONSE),
+        (Category.DL, QuestionType.TRUE_FALSE),
+        (Category.DL, QuestionType.MCQ),
+        (Category.DL, QuestionType.MULTIPLE_RESPONSE),
+    ], f"sections are out of order: {blocks}"
+
+    ml = [q for q in questions if q.category == Category.ML]
+    assert len(ml) == 30, "Part 1 is half the paper"
+    assert questions[:30] == ml, "all of Part 1 comes before Part 2"
+
+
+def test_a_short_paper_keeps_the_section_structure(clean_db) -> None:
+    exam = mock_exam.build_exam(n_questions=12, use_llm=False, seed=4)
+    questions = exam["questions"]
+    assert len(questions) == 12
+
+    blocks = []
+    for q in questions:
+        key = (q.category, q.question_type)
+        if not blocks or blocks[-1] != key:
+            blocks.append(key)
+    assert len(blocks) == len(set(blocks)), (
+        f"a section must appear once, not be revisited later: {blocks}"
+    )

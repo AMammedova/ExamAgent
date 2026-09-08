@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-from ..models.schemas import MockExamReport, Question
+from ..models.schemas import Category, MockExamReport, Question, points_for
 from ..services import learning_path as lp
 from ..services import mock_exam
 from .common import (
@@ -163,6 +163,29 @@ def _render_setup(state: dict[str, Any]) -> None:
 
 
 # --------------------------------------------------------------- exam
+def _section_header(questions: list[Question], index: int) -> str | None:
+    """The paper's own heading for a question, shown when a new section starts.
+
+    Part 1 is Machine Learning, Part 2 Deep Learning, and inside each the
+    sections run A / B / C - the same running order the printed paper uses.
+    """
+    q = questions[index]
+    previous = questions[index - 1] if index else None
+    same_section = (previous is not None
+                    and previous.category == q.category
+                    and previous.question_type == q.question_type)
+    if same_section:
+        return None
+    letter = mock_exam.SECTION_LETTERS.get(q.question_type)
+    if letter is None:
+        return None
+    part = 1 if q.category == Category.ML else 2
+    title = mock_exam.SECTION_TITLES.get(q.question_type, "")
+    marks = points_for(q.question_type)
+    return (f"Part {part} — {q.category.value} · **Section {letter}: {title}** "
+            f"({marks} {'mark' if marks == 1 else 'marks'} each)")
+
+
 def _render_exam(state: dict[str, Any]) -> None:
     exam = state["exam"]
     questions: list[Question] = exam["questions"]
@@ -201,6 +224,9 @@ def _render_exam(state: dict[str, Any]) -> None:
         idx = max(0, min(len(questions) - 1, idx))
         q = questions[idx]
         st.divider()
+        heading = _section_header(questions, idx)
+        if heading:
+            st.caption(heading)
         st.markdown(f"**Question {idx + 1} of {len(questions)}** "
                     + chip(TYPE_LABEL.get(q.question_type, ""), "#539bf5")
                     + chip(q.category.value.split()[0], "#8b949e"),
@@ -229,6 +255,9 @@ def _render_exam(state: dict[str, Any]) -> None:
     else:
         for i, q in enumerate(questions, 1):
             st.divider()
+            heading = _section_header(questions, i - 1)
+            if heading:
+                st.markdown(f"##### {heading}")
             st.markdown(f"**Question {i}** "
                         + chip(TYPE_LABEL.get(q.question_type, ""), "#539bf5")
                         + chip(q.category.value.split()[0], "#8b949e"),
