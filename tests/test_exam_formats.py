@@ -280,10 +280,16 @@ def test_localise_is_a_no_op_in_english(clean_db) -> None:
     assert ef.localise(q, language="en") is q
 
 
-def test_localise_is_a_no_op_without_an_llm(clean_db) -> None:
+def test_localise_still_translates_without_an_llm(clean_db) -> None:
+    """`use_llm` only gates the LLM top-up for anything the checked-in
+    translations miss. With no API credit - the case this was built for - the
+    checked-in wording must still apply."""
     rng = random.Random(12)
     q = ef.build_true_false("pca", rng)
-    assert ef.localise(q, use_llm=False, language="az") is q
+    out = ef.localise(q, use_llm=False, language="az")
+    assert out is not q
+    assert out.prompt != q.prompt, "the statement was left in English"
+    assert out.correct_option == q.correct_option
 
 
 def test_localise_translates_the_wording_but_never_the_key(clean_db, monkeypatch) -> None:
@@ -336,3 +342,88 @@ def test_a_misaligned_translation_is_discarded(clean_db, monkeypatch) -> None:
     monkeypatch.setattr("examagent.services.llm.get_llm", lambda: _Fake())
     out = exam_formats.translate_all(["first", "second", "third"], "az")
     assert out == {} or all(v not in ("only one",) for v in out.values())
+
+
+# ------------------------------------------- translations shipped with the app
+def test_every_bank_statement_has_a_checked_in_azerbaijani_translation() -> None:
+    """The whole bank must be covered: an untranslated statement shows up as a
+    lone English question in an otherwise Azerbaijani paper. If the bank grows,
+    this fails until the new statements are translated."""
+    from examagent.data.translations_az import coverage
+
+    cov = coverage()
+    assert cov["translated"] == cov["bank_statements"], (
+        f"{cov['bank_statements'] - cov['translated']} bank statements are still "
+        "untranslated"
+    )
+
+
+def test_offline_questions_come_out_in_azerbaijani_with_no_api(clean_db, monkeypatch):
+    """The case this exists for: no API credit at all. Every closed format must
+    still be readable in the configured language."""
+    from examagent.services import question_gen as qg
+
+    monkeypatch.setenv("LANGUAGE", "az")
+    from examagent.config import reload_settings
+
+    reload_settings()
+    try:
+        for qtype in (QuestionType.TRUE_FALSE, QuestionType.MCQ,
+                      QuestionType.MULTIPLE_RESPONSE):
+            q = qg.generate_question("pca", qtype, use_llm=False, seed=5)
+            text = " ".join([q.prompt, *q.statements,
+                             *[o.text for o in q.options if o.text
+                               not in ("True", "False")]])
+            assert any(marker in text.lower()
+                       for marker in ("ə", "ı", "ğ", "ş", " və ")), (
+                f"{qtype.value} came out in English: {q.prompt[:80]}"
+            )
+    finally:
+        monkeypatch.delenv("LANGUAGE", raising=False)
+        reload_settings()
+
+
+def test_translation_never_moves_the_answer(clean_db) -> None:
+    """Wording only. If localising could touch the key or the lettering, a
+    translated paper would be marked against the wrong answer."""
+    rng = random.Random(5)
+    for build in (ef.build_true_false, ef.build_multiple_choice,
+                  ef.build_multiple_response):
+        original = build("pca", rng)
+        if original is None:
+            continue
+        localised = ef.localise(original, use_llm=False, language="az")
+        assert localised.correct_option == original.correct_option
+        assert [o.key for o in localised.options] == [o.key for o in original.options]
+        assert localised.question_type == original.question_type
+        assert localised.topic == original.topic
+
+
+def test_true_false_answers_are_not_translated(clean_db) -> None:
+    """'True'/'False' are the values the marker compares against."""
+    rng = random.Random(6)
+    q = ef.localise(ef.build_true_false("pca", rng), use_llm=False, language="az")
+    assert {o.text for o in q.options} == {"True", "False"}
+    assert evaluate(q, q.correct_option, use_llm=False).score == 10.0
+
+
+def test_combination_options_are_joined_in_azerbaijani(clean_db) -> None:
+    rng = random.Random(7)
+    q = ef.localise(ef.build_multiple_response("pca", rng), use_llm=False,
+                    language="az")
+    texts = [o.text for o in q.options]
+    assert not any(" and " in t for t in texts), f"still English: {texts}"
+
+
+def test_checked_in_wording_beats_a_stale_cached_translation(clean_db) -> None:
+    """A machine translation cached by an earlier run must not override text a
+    person has read and checked in."""
+    from examagent.models.db import kv_set, session_scope
+
+    phrase = "Which of the following statements are correct?"
+    with session_scope() as s:
+        kv_set(s, f"{ef._TRANSLATION_KV}:az", {phrase: "KÖHNƏ KEŞ"})
+
+    table = ef._static_table("az")
+    assert table[phrase] != "KÖHNƏ KEŞ"
+    assert table[phrase] == "Aşağıdakı ifadələrdən hansılar doğrudur?"

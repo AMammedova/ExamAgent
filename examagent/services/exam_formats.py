@@ -372,10 +372,19 @@ def _store_translations(language: str, pairs: dict[str, str]) -> None:
 
 
 def translate_all(texts: list[str], language: str) -> dict[str, str]:
-    """English -> `language` for a batch of statements, cached across calls."""
+    """English -> `language` for a batch of statements.
+
+    Checked-in translations first (see `data.translations_az`): they cost
+    nothing, work with no API credit at all, and are the reason an offline
+    paper is not in English. The LLM only covers whatever they miss, and its
+    output is cached so each sentence is paid for once.
+    """
     from .llm import get_llm
 
-    cache = _translation_cache(language)
+    # checked-in wording wins over anything a previous run cached: it has been
+    # read by a person, the cache has not
+    cache = {**_translation_cache(language), **_checked_in(language)}
+
     missing = [t for t in dict.fromkeys(texts) if t and t not in cache]
     if not missing:
         return cache
@@ -413,6 +422,11 @@ def localise(question: Question, use_llm: bool = True,
              language: str | None = None) -> Question:
     """Return the item with its text in the configured language.
 
+    `use_llm` only governs whether the *LLM* may be asked for anything the
+    checked-in translations miss - the translations themselves always apply,
+    which is what lets an offline paper, or one built with no API credit left,
+    still come out in the student's language.
+
     Only the wording moves: the correct option, the truth flags behind it and
     the option lettering are untouched, so a translation cannot mis-key an item
     - at worst it reads awkwardly.
@@ -420,18 +434,20 @@ def localise(question: Question, use_llm: bool = True,
     from ..config import get_settings
 
     language = (language or get_settings().language or "en").strip().lower()
-    if language == "en" or not use_llm:
+    if language == "en":
         return question
 
+    # 'True'/'False' are the answer values themselves, not prose: translating
+    # them would stop the marker recognising the answer
     fixed = {"True", "False"}
-    texts = [question.prompt, *question.statements,
+    texts = [question.prompt, *question.statements, question.model_answer,
              *[o.text for o in question.options if o.text not in fixed]]
     texts = [t for t in texts if t and t.strip()]
     if not texts:
         return question
 
     try:
-        table = translate_all(texts, language)
+        table = translate_all(texts, language) if use_llm else _static_table(language)
     except Exception as exc:  # translation is a nicety, never a blocker
         log.warning("bank translation failed: %s", exc)
         return question
@@ -440,9 +456,76 @@ def localise(question: Question, use_llm: bool = True,
         return table.get(text, text)
 
     translated = question.model_copy(deep=True)
-    translated.prompt = _t(question.prompt)
+    translated.prompt = _localise_prompt(question.prompt, table, language)
     translated.statements = [_t(s) for s in question.statements]
     for option in translated.options:
         if option.text not in fixed:
-            option.text = _t(option.text)
+            option.text = _localise_option(option.text, table, language)
+    translated.model_answer = _localise_model_answer(translated, table, language)
     return translated
+
+
+def _localise_prompt(prompt: str, table: dict[str, str], language: str) -> str:
+    """Stems are either fixed (and in the table) or built around a topic name."""
+    if prompt in table:
+        return table[prompt]
+    if language == "az" and prompt.startswith("Which statement about "):
+        topic = prompt[len("Which statement about "):].removesuffix(" is correct?")
+        return f"{topic} haqqında hansı ifadə doğrudur?"
+    return prompt
+
+
+def _localise_option(text: str, table: dict[str, str], language: str) -> str:
+    """Combination options are built from statement numbers, so they are joined
+    here rather than translated - '1, 3, and 4' is not a sentence to look up."""
+    if text in table:
+        return table[text]
+    if language == "az" and text and text[0].isdigit():
+        return text.replace(", and ", ", ").replace(" and ", " və ")
+    return text
+
+
+def _static_table(language: str) -> dict[str, str]:
+    """Translations that need no API call at all."""
+    return {**_translation_cache(language), **_checked_in(language)}
+
+
+def _checked_in(language: str) -> dict[str, str]:
+    """Translations shipped with the app - no API call, no API budget."""
+    if language != "az":
+        return {}
+    from ..data import translations_az
+
+    return {**translations_az.STATEMENTS, **translations_az.PHRASES}
+
+
+def _localise_model_answer(question: Question, table: dict[str, str],
+                           language: str) -> str:
+    """The generators' own wording around the answer, in the student's language.
+
+    Rebuilt rather than translated word for word: these strings are assembled
+    from the key and the statement numbers, so the parts are known here and a
+    round trip through a translator would only risk mangling them.
+    """
+    if language != "az":
+        return question.model_answer
+
+    key = question.correct_option or ""
+    if question.question_type == QuestionType.TRUE_FALSE:
+        verdict = table.get(
+            "The statement holds as written." if key == "True" else
+            "The statement is false as written - check the clause that overstates it.",
+            "",
+        )
+        return f"{key}. {verdict}".strip()
+
+    if question.question_type == QuestionType.MULTIPLE_RESPONSE:
+        listed = next((o.text for o in question.options if o.key == key), "")
+        return (f"{key} — {listed} nömrəli ifadələr doğrudur; "
+                "qalanları yazıldığı kimi yanlışdır.")
+
+    if question.question_type == QuestionType.MCQ:
+        answer = next((o.text for o in question.options if o.key == key), "")
+        return f"{key}. {table.get(answer, answer)}"
+
+    return question.model_answer
