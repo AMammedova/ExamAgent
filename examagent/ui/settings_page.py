@@ -157,8 +157,14 @@ def _llm(settings) -> None:
 
     st.divider()
     if st.button("Test the connection"):
+        # Rebuild first: a client shut down after running out of credit stays
+        # shut down, so without this the test would report the old failure
+        # instead of finding out whether credit has since been added.
+        # force=True rebuilds from the stored credentials - session key included -
+        # rather than discarding them.
+        reset_llm()
         with st.spinner("Calling the provider…"):
-            resp = get_llm().complete("Reply with exactly: OK", max_tokens=16)
+            resp = get_llm(force=True).complete("Reply with exactly: OK", max_tokens=16)
         if resp.ok:
             st.success(f"Response in {resp.latency_ms} ms: {resp.text[:120]}")
         else:

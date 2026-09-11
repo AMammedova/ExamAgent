@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,26 @@ log = get_logger(__name__)
 
 class LLMError(RuntimeError):
     pass
+
+
+#: Provider errors that no amount of retrying will get past. Anything else -
+#: a timeout, a 500, a transient rate limit - is worth another attempt.
+_FATAL_ERRORS: dict[str, str] = {
+    "credit_balance_exhausted": "no credit left on the API account",
+    "insufficient_quota": "the API account is out of quota",
+    "invalid_api_key": "the API key is not valid",
+    "account_deactivated": "the API account is deactivated",
+    "authentication_error": "the API key was rejected",
+}
+
+
+def _fatal_reason(message: str) -> str:
+    """A plain reason if this error means 'stop asking', else an empty string."""
+    low = message.lower()
+    for marker, reason in _FATAL_ERRORS.items():
+        if marker in low:
+            return reason
+    return ""
 
 
 @dataclass
@@ -64,6 +85,8 @@ class LLMClient:
         )
         self._client: Any = None
         self._init_error: str | None = None
+        self._fatal_reported = False
+        self._fatal_lock = threading.Lock()
         if self.available:
             try:
                 self._client = self._build_client()
@@ -87,14 +110,17 @@ class LLMClient:
         }
 
     def _build_client(self) -> Any:
+        # max_retries=0: this class already retries what is worth retrying, and
+        # leaving the SDK's own ladder on top of it doubles both the wait and
+        # the log noise when a call is failing for good.
         if self.provider == "anthropic":
             import anthropic
 
-            return anthropic.Anthropic(api_key=self._api_key)
+            return anthropic.Anthropic(api_key=self._api_key, max_retries=0)
         if self.provider == "openai":
             import openai
 
-            return openai.OpenAI(api_key=self._api_key)
+            return openai.OpenAI(api_key=self._api_key, max_retries=0)
         raise LLMError(f"unsupported provider: {self.provider}")
 
     # ---- calls ----
@@ -148,6 +174,25 @@ class LLMClient:
                 )
             except Exception as exc:
                 last_err = f"{type(exc).__name__}: {exc}"
+                fatal = _fatal_reason(last_err)
+                if fatal:
+                    # Exhausted credit or a bad key is not a blip: retrying cannot
+                    # fix it, and every later call would repeat the whole retry
+                    # ladder. Shut the client down once, say so once, and let
+                    # every caller fall through to the offline engines.
+                    with self._fatal_lock:
+                        first = not self._fatal_reported
+                        self._fatal_reported = True
+                        self._init_error = fatal
+                    if first:
+                        # in-flight parallel workers all land here at once; the
+                        # student needs to read this, not scroll past it
+                        log.warning(
+                            "LLM disabled for this session - %s. The deterministic "
+                            "engines carry on; add credit (or fix the key) and "
+                            "restart, or press 'Test the connection' in Settings.",
+                            fatal)
+                    return LLMResponse("", self.provider, self.model, error=fatal)
                 log.warning("LLM call failed (attempt %d): %s", attempt + 1, last_err)
                 if attempt < retries:
                     time.sleep(1.2 * (attempt + 1))
@@ -219,6 +264,7 @@ def extract_json(text: str) -> dict[str, Any] | list[Any] | None:
 
 
 _client: LLMClient | None = None
+_client_lock = threading.Lock()
 
 #: session_state key holding this visitor's own {provider, api_key, model,
 #: max_tokens, temperature} - set by the Settings page's "only for my session"
@@ -255,9 +301,15 @@ def get_llm(force: bool = False) -> LLMClient:
         return client
 
     global _client
-    if _client is None or force:
-        _client = LLMClient()
-    return _client
+    # Locked: exam papers are generated on a thread pool, and without this each
+    # worker that arrives while the client is still None builds its own. That
+    # meant a handful of duplicate clients, each with its own idea of whether
+    # the provider had already refused - so one dead account was reported once
+    # per worker instead of once.
+    with _client_lock:
+        if _client is None or force:
+            _client = LLMClient()
+        return _client
 
 
 def reset_llm() -> None:
