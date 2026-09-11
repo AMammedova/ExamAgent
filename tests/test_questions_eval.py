@@ -183,7 +183,7 @@ def test_generate_batch_spreads_topics_and_types(clean_db) -> None:
     batch = generate_batch(topics, 12, use_llm=False, seed=9)
     assert len(batch) == 12
     assert len({q.topic for q in batch}) == len(topics)
-    assert len({q.question_type for q in batch}) >= 3
+    assert len({q.question_type for q in batch}) >= 2
     assert len({q.id for q in batch}) == 12, "questions must not repeat within a batch"
 
 

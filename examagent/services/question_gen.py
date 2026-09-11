@@ -58,13 +58,13 @@ EXAM_TYPES = (
     QuestionType.MULTIPLE_RESPONSE,
 )
 
-#: The default mix mirrors the AI-CORE-101 paper: per 30-question part, 12
-#: True/False, 9 single-best multiple choice and 9 multiple response. Practice
-#: in the format you will be examined in.
+#: The default mix mirrors the announced paper: per 30-question part, 12
+#: True/False and 18 single-best multiple choice. Practice in the format you
+#: will be examined in. Multiple response is still supported - the practice
+#: PDF used it - but the sat paper does not, so it is not dealt by default.
 DEFAULT_MIX: dict[QuestionType, float] = {
     QuestionType.TRUE_FALSE: 12 / 30,
-    QuestionType.MCQ: 9 / 30,
-    QuestionType.MULTIPLE_RESPONSE: 9 / 30,
+    QuestionType.MCQ: 18 / 30,
 }
 
 #: The longer written formats. Not on the paper, but they build the

@@ -36,20 +36,22 @@ from .question_gen import EXAM_TYPES, generate_question
 
 log = get_logger(__name__)
 
-#: The real paper (AI-CORE-101): each 30-question part is 12 True/False at 1
-#: mark, 9 single-best multiple choice at 3 marks and 9 multiple response at 4
-#: marks - 30 questions, 75 marks per part, 150 marks over the two parts.
+#: The sat paper, per the exam office's own announcement: 60 questions over
+#: two 30-question parts, Machine Learning then Deep Learning, each part 12
+#: True/False and 18 single-best multiple choice, in 150 minutes.
+#:
+#: The practice PDF also carried a multiple-response section; the announced
+#: paper does not, so it is off the blueprint. The format is still built and
+#: tested (`exam_formats`) - it just is not what she will sit.
 EXAM_BLUEPRINT: list[tuple[QuestionType, int]] = [
     (QuestionType.TRUE_FALSE, 12),
-    (QuestionType.MCQ, 9),
-    (QuestionType.MULTIPLE_RESPONSE, 9),
+    (QuestionType.MCQ, 18),
 ]
 
 #: Same proportions, scaled down for a quick paper.
 SHORT_BLUEPRINT: list[tuple[QuestionType, int]] = [
-    (QuestionType.TRUE_FALSE, 4),
+    (QuestionType.TRUE_FALSE, 2),
     (QuestionType.MCQ, 3),
-    (QuestionType.MULTIPLE_RESPONSE, 3),
 ]
 
 #: Length and time of the real paper, for the "full mock" default.
@@ -328,8 +330,8 @@ def build_topic_sweep(
         pool = [t for t in pool if t in wanted]
 
     # cycle the formats in the paper's own 12 / 9 / 9 proportion
-    cycle = ([QuestionType.TRUE_FALSE] * 4 + [QuestionType.MCQ] * 3
-             + [QuestionType.MULTIPLE_RESPONSE] * 3)
+    cycle = [qtype for qtype, count in EXAM_BLUEPRINT
+             for _ in range(max(1, count // 6))]
     rng = random.Random(len(pool))
     plan = [(topic_id, cycle[i % len(cycle)])
             for i, topic_id in enumerate(t for t in pool for _ in range(per_topic))]

@@ -68,7 +68,9 @@ def test_exam_follows_the_blueprint(clean_db) -> None:
 
 
 def test_the_full_paper_matches_the_real_one(clean_db) -> None:
-    """60 questions, 24/18/18 across the three formats, 150 marks, pass at 90."""
+    """The announced paper: 60 questions in two 30-question parts, each part
+    12 True/False and 18 single-best multiple choice. No multiple response -
+    the practice PDF had a Section C, the sat paper does not."""
     exam = mock_exam.build_exam(
         n_questions=mock_exam.FULL_EXAM_QUESTIONS,
         duration_minutes=mock_exam.FULL_EXAM_MINUTES,
@@ -79,19 +81,24 @@ def test_the_full_paper_matches_the_real_one(clean_db) -> None:
 
     counts = Counter(q.question_type for q in questions)
     assert counts[QuestionType.TRUE_FALSE] == 24
-    assert counts[QuestionType.MCQ] == 18
-    assert counts[QuestionType.MULTIPLE_RESPONSE] == 18
+    assert counts[QuestionType.MCQ] == 36
+    assert QuestionType.MULTIPLE_RESPONSE not in counts
 
-    assert sum(points_for(q.question_type) for q in questions) == 150
     assert Counter(q.category for q in questions)[Category.ML] == 30
+    for category in (Category.ML, Category.DL):
+        part = [q for q in questions if q.category == category]
+        by_type = Counter(q.question_type for q in part)
+        assert by_type[QuestionType.TRUE_FALSE] == 12, f"{category}: {by_type}"
+        assert by_type[QuestionType.MCQ] == 18, f"{category}: {by_type}"
 
     report = mock_exam.submit_exam(
         exam["exam_id"], {q.id: q.correct_option for q in questions},
         duration_seconds=9000, use_llm=False,
     )
-    assert report.max_score == 150
-    assert report.total_score == 150
-    assert report.pass_mark == 90
+    expected = sum(points_for(q.question_type) for q in questions)
+    assert report.max_score == expected
+    assert report.total_score == expected
+    assert report.pass_mark == pytest.approx(expected * 0.6)
     assert report.passed is True
 
 
@@ -126,7 +133,7 @@ def test_topic_ids_with_a_single_topic_still_builds_a_paper(clean_db) -> None:
 def test_short_exam_still_mixes_formats(clean_db) -> None:
     exam = mock_exam.build_exam(n_questions=8, duration_minutes=30, use_llm=False, seed=2)
     assert len(exam["questions"]) == 8
-    assert len({q.question_type for q in exam["questions"]}) >= 3
+    assert len({q.question_type for q in exam["questions"]}) >= 2
 
 
 def test_exam_questions_never_leak_answers(clean_db) -> None:
@@ -289,10 +296,8 @@ def test_the_paper_runs_in_the_printed_order(clean_db) -> None:
     assert blocks == [
         (Category.ML, QuestionType.TRUE_FALSE),
         (Category.ML, QuestionType.MCQ),
-        (Category.ML, QuestionType.MULTIPLE_RESPONSE),
         (Category.DL, QuestionType.TRUE_FALSE),
         (Category.DL, QuestionType.MCQ),
-        (Category.DL, QuestionType.MULTIPLE_RESPONSE),
     ], f"sections are out of order: {blocks}"
 
     ml = [q for q in questions if q.category == Category.ML]
