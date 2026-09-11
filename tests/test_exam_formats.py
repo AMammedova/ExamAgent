@@ -271,3 +271,68 @@ def test_a_requested_closed_format_that_fails_tries_the_others_before_giving_up(
     assert q.question_type != QuestionType.MULTIPLE_RESPONSE, (
         "the fake was rigged to fail exactly this one"
     )
+
+
+# ---------------------------------------------------------------- translation
+def test_localise_is_a_no_op_in_english(clean_db) -> None:
+    rng = random.Random(11)
+    q = ef.build_true_false("pca", rng)
+    assert ef.localise(q, language="en") is q
+
+
+def test_localise_is_a_no_op_without_an_llm(clean_db) -> None:
+    rng = random.Random(12)
+    q = ef.build_true_false("pca", rng)
+    assert ef.localise(q, use_llm=False, language="az") is q
+
+
+def test_localise_translates_the_wording_but_never_the_key(clean_db, monkeypatch) -> None:
+    """Bank items are exact because their key comes from recorded truth flags.
+    Translation may only move the wording - if it could touch the lettering or
+    the correct option, a translated paper would be wrongly marked."""
+    rng = random.Random(13)
+    q = ef.build_multiple_response("pca", rng)
+    assert q is not None
+
+    def fake_translate(texts, language):
+        return {t: f"AZ::{t}" for t in texts}
+
+    monkeypatch.setattr(ef, "translate_all", fake_translate)
+    out = ef.localise(q, language="az")
+
+    assert out.correct_option == q.correct_option
+    assert [o.key for o in out.options] == [o.key for o in q.options]
+    assert out.question_type == q.question_type
+    assert all(s.startswith("AZ::") for s in out.statements)
+    assert out.prompt.startswith("AZ::")
+    assert q.prompt == "Which of the following statements are correct?", (
+        "the original must not be mutated"
+    )
+
+
+def test_true_false_options_stay_true_and_false_when_translated(clean_db, monkeypatch):
+    """'True'/'False' are the answer values themselves, not prose - translating
+    them would stop the marker recognising the answer."""
+    rng = random.Random(14)
+    q = ef.build_true_false("pca", rng)
+    monkeypatch.setattr(ef, "translate_all",
+                        lambda texts, language: {t: f"AZ::{t}" for t in texts})
+    out = ef.localise(q, language="az")
+    assert {o.text for o in out.options} == {"True", "False"}
+    assert out.correct_option in ("True", "False")
+
+
+def test_a_misaligned_translation_is_discarded(clean_db, monkeypatch) -> None:
+    """A short or misordered list would attach the wrong sentence to the wrong
+    statement - silently changing which ones are true."""
+    from examagent.services import exam_formats
+
+    class _Fake:
+        available = True
+
+        def complete_json(self, prompt, **kwargs):
+            return {"translations": ["only one"]}, None
+
+    monkeypatch.setattr("examagent.services.llm.get_llm", lambda: _Fake())
+    out = exam_formats.translate_all(["first", "second", "third"], "az")
+    assert out == {} or all(v not in ("only one",) for v in out.values())

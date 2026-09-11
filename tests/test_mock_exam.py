@@ -313,3 +313,46 @@ def test_a_short_paper_keeps_the_section_structure(clean_db) -> None:
     assert len(blocks) == len(set(blocks)), (
         f"a section must appear once, not be revisited later: {blocks}"
     )
+
+
+# ---------------------------------------------------------------- topic sweep
+def test_a_sweep_covers_every_topic_it_is_given(clean_db) -> None:
+    """The sweep exists because `build_exam` trades topics for format fidelity:
+    it walks to a neighbouring topic when the planned section format does not
+    come out. A practice sweep inverts that - the topic is the point."""
+    from examagent.services.exam_formats import facts_for
+
+    wanted = [t for t in ("pca", "backpropagation", "dropout", "knn", "attention")
+              if facts_for(t)]
+    sweep = mock_exam.build_topic_sweep(topic_ids=wanted, use_llm=False,
+                                        label="sweep test")
+    covered = {q.topic for q in sweep["questions"]}
+    assert covered == set(wanted), f"missing {set(wanted) - covered}"
+
+
+def test_a_sweep_only_carries_questions_that_mark_exactly(clean_db) -> None:
+    """It is marked question by question, so a written item nobody can tick or
+    cross has no place on it."""
+    sweep = mock_exam.build_topic_sweep(use_llm=False, label="sweep formats")
+    questions = sweep["questions"]
+    assert questions
+    assert all(q.question_type in EXAM_TYPES for q in questions)
+    assert all(q.correct_option for q in questions)
+
+
+def test_a_sweep_carries_no_clock(clean_db) -> None:
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca"], use_llm=False)
+    assert sweep["duration_minutes"] == 0
+
+
+def test_a_sweep_is_persisted_and_can_be_submitted(clean_db) -> None:
+    wanted = ["pca", "backpropagation", "dropout"]
+    sweep = mock_exam.build_topic_sweep(topic_ids=wanted, use_llm=False,
+                                        label="sweep submit")
+    questions = sweep["questions"]
+    report = mock_exam.submit_exam(
+        sweep["exam_id"], {q.id: q.correct_option for q in questions},
+        duration_seconds=0, use_llm=False,
+    )
+    assert report.percentage == 100.0
+    assert report.max_score == sum(points_for(q.question_type) for q in questions)

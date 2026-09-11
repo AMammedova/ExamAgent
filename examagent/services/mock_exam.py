@@ -65,13 +65,19 @@ def _select_topics(session, n: int, category: str | None = None,
     weak = [t for t in weakest_topics(session, limit=max(n, len(allowed_ids or [])))
             if (category is None or t.category == category)
             and (allowed_ids is None or t.id in allowed_ids)]
+
+    if allowed_ids is not None:
+        # An explicit allowlist is the caller saying which topics the paper is
+        # about, so use all of them - weakest first, but nothing dropped.
+        # Ranking them down to `n` would silently sit a wide paper on a
+        # handful of topics, and drop every MEDIUM/LOW one entirely.
+        order = {t.id: i for i, t in enumerate(weak)}
+        return sorted(topics, key=lambda t: order.get(t.id, len(order)))
+
     relevant = sorted(
         [t for t in topics if t.priority in ("CRITICAL", "HIGH")],
         key=lambda t: -(t.exam_relevance * Priority(t.priority).weight),
     )
-    if allowed_ids is not None and not relevant:
-        # a small allowed set may be entirely MEDIUM/LOW priority - still usable
-        relevant = sorted(topics, key=lambda t: -(t.exam_relevance))
     out: list[Topic] = []
     seen: set[str] = set()
     # alternate weak / high-relevance so the paper is not purely a weakness drill
@@ -180,17 +186,26 @@ def build_exam(
     # One task per question, then generated concurrently: each item is an
     # independent LLM round trip, and a 60-question paper done one at a time
     # keeps the student staring at a spinner for minutes.
-    tasks: list[tuple[int, QuestionType, Any, int, int]] = []
+    tasks: list[tuple[int, QuestionType, Any, int, int, int]] = []
+    seats: dict[Category, int] = {}
     for i, (category, qtype) in enumerate(plan):
         pool = (ml_topics if category == Category.ML else dl_topics) \
             or ml_topics or dl_topics
         if not pool:
             break
-        tasks.append((i, qtype, pool, rng.choice([4, 5, 5, 6]), rng.randint(1, 10 ** 6)))
+        # Position within this part, so consecutive questions walk the pool one
+        # topic at a time. Indexing by the paper position instead advanced every
+        # other question and left a 60-question paper sitting on ~23 topics.
+        seat = seats.get(category, 0)
+        seats[category] = seat + 1
+        tasks.append((i, qtype, pool, rng.choice([4, 5, 5, 6]),
+                      rng.randint(1, 10 ** 6), seat))
 
-    def _build_one(task: tuple[int, QuestionType, Any, int, int]) -> tuple[int, Question]:
-        i, qtype, pool, difficulty, qseed = task
-        topic = pool[(i // 2) % len(pool)]
+    def _build_one(
+        task: tuple[int, QuestionType, Any, int, int, int],
+    ) -> tuple[int, Question]:
+        i, qtype, pool, difficulty, qseed, seat = task
+        topic = pool[seat % len(pool)]
         q = generate_question(topic.id, qtype, difficulty, use_llm=use_llm,
                               seed=qseed, min_difficulty=4)
         # A paper is defined by its blueprint - 150 marks only add up if the
@@ -202,14 +217,14 @@ def build_exam(
         if q.question_type != qtype:
             if use_llm:
                 for offset in (1, 2):
-                    other = pool[(i // 2 + offset) % len(pool)]
+                    other = pool[(seat + offset) % len(pool)]
                     candidate = generate_question(other.id, qtype, difficulty,
                                                   use_llm=True, seed=qseed + offset,
                                                   min_difficulty=4)
                     if candidate.question_type == qtype:
                         return i, candidate
             for offset in range(len(pool)):
-                other = pool[(i // 2 + offset) % len(pool)]
+                other = pool[(seat + offset) % len(pool)]
                 candidate = generate_question(other.id, qtype, difficulty,
                                               use_llm=False, seed=qseed + offset,
                                               min_difficulty=4)
@@ -238,11 +253,11 @@ def build_exam(
     # questions actually sitting in it.
     questions: list[Question] = []
     seen_ids: set[str] = set()
-    for i, qtype, pool, difficulty, qseed in tasks:
+    for i, qtype, pool, difficulty, qseed, seat in tasks:
         q = results.get(i)
         if q is None or q.id in seen_ids or q.question_type != qtype:
             for offset in range(len(pool)):
-                other = pool[(i // 2 + offset) % len(pool)]
+                other = pool[(seat + offset) % len(pool)]
                 candidate = generate_question(other.id, qtype, difficulty,
                                               use_llm=False, exclude_ids=seen_ids,
                                               seed=qseed + offset + 977,
@@ -255,6 +270,12 @@ def build_exam(
         seen_ids.add(q.id)
         questions.append(q)
 
+    return _persist(questions, label, duration_minutes)
+
+
+def _persist(questions: list[Question], label: str,
+             duration_minutes: int) -> dict[str, Any]:
+    """Store a paper and hand back the dict every exam caller works with."""
     with session_scope() as s:
         exam = MockExam(
             label=label,
@@ -266,13 +287,83 @@ def build_exam(
         s.flush()
         exam_id = int(exam.id)
 
-    log.info("built mock exam %s with %d questions", exam_id, len(questions))
+    log.info("built exam %s with %d questions", exam_id, len(questions))
     return {
         "exam_id": exam_id,
         "questions": questions,
         "duration_minutes": duration_minutes,
         "started_at": datetime.utcnow(),
     }
+
+
+def build_topic_sweep(
+    topic_ids: list[str] | None = None,
+    per_topic: int = 1,
+    use_llm: bool = True,
+    label: str = "Practice paper",
+    max_workers: int = 8,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """One question per topic, in the paper's formats - a practice sweep.
+
+    `build_exam` builds *the paper*: fixed sections, fixed marks, so it will
+    move to a neighbouring topic when the planned format does not come out.
+    A sweep inverts that trade - the topic is the point, and whichever closed
+    format that topic can carry is fine. Nothing is dropped, so every topic
+    asked for appears.
+    """
+    import random
+
+    with session_scope() as s:
+        pool = [t.id for t in all_topics(s)]
+    if topic_ids:
+        wanted = set(topic_ids)
+        pool = [t for t in pool if t in wanted]
+
+    # cycle the formats in the paper's own 12 / 9 / 9 proportion
+    cycle = ([QuestionType.TRUE_FALSE] * 4 + [QuestionType.MCQ] * 3
+             + [QuestionType.MULTIPLE_RESPONSE] * 3)
+    rng = random.Random(len(pool))
+    plan = [(topic_id, cycle[i % len(cycle)])
+            for i, topic_id in enumerate(t for t in pool for _ in range(per_topic))]
+
+    def _one(job: tuple[int, str, QuestionType]) -> tuple[int, Question]:
+        i, topic_id, qtype = job
+        return i, generate_question(topic_id, qtype, difficulty=rng.choice([4, 5, 5]),
+                                    use_llm=use_llm, seed=rng.randint(1, 10 ** 6),
+                                    min_difficulty=4)
+
+    jobs = [(i, topic_id, qtype) for i, (topic_id, qtype) in enumerate(plan)]
+    results: dict[int, Question] = {}
+    if jobs:
+        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(jobs)))) as ex:
+            futures = [ex.submit(_one, job) for job in jobs]
+            for done, future in enumerate(as_completed(futures), 1):
+                try:
+                    i, q = future.result()
+                    results[i] = q
+                except Exception as exc:  # one bad topic must not sink the sweep
+                    log.warning("sweep question failed: %s", exc)
+                if on_progress is not None:
+                    on_progress(done, len(futures))
+
+    questions: list[Question] = []
+    seen: set[str] = set()
+    for i in range(len(jobs)):
+        q = results.get(i)
+        if q is None or q.id in seen:
+            continue
+        if q.question_type not in EXAM_TYPES:
+            # A sweep is marked question by question, so it can only carry items
+            # that mark exactly. Offline, a topic the bank has no facts for has
+            # nothing closed-form to offer and is left out rather than shipped
+            # as a written question nobody can tick or cross.
+            continue
+        seen.add(q.id)
+        questions.append(q)
+
+    # marked as you go, so the sweep carries no clock of its own
+    return _persist(questions, label, duration_minutes=0)
 
 
 def load_exam(exam_id: int) -> dict[str, Any] | None:

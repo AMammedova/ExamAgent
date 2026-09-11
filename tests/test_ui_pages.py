@@ -12,8 +12,9 @@ streamlit_testing = pytest.importorskip("streamlit.testing.v1")
 AppTest = streamlit_testing.AppTest
 
 APP = str((pathlib.Path(__file__).resolve().parent.parent / "app.py"))
-PAGES = ["Dashboard", "Learning Path", "Study", "Quiz", "Mock Exam", "Chat",
-         "Weaknesses", "Knowledge Map", "Progress", "Materials", "Settings"]
+PAGES = ["Dashboard", "Learning Path", "Study", "Quiz", "Mock Exam",
+         "Practice Paper", "Chat", "Weaknesses", "Knowledge Map", "Progress",
+         "Materials", "Settings"]
 
 
 def _run(page: str | None = None, **state):
@@ -322,4 +323,60 @@ def test_learning_path_marks_a_topic_done_right_after_the_last_answer(clean_db) 
     assert tid in lp.completed_topic_ids(), (
         "the topic must be marked done as soon as the last question is scored, "
         "not only after a later 'Finish topic' click"
+    )
+
+
+def test_practice_paper_marks_each_answer_as_it_is_submitted(clean_db) -> None:
+    """The whole point of the page: answer, see immediately whether it was
+    right, keep going - then a total at the end."""
+    from examagent.services import mock_exam, progress
+
+    progress.mark_first_run_complete()
+    sweep = mock_exam.build_topic_sweep(
+        topic_ids=["pca", "backpropagation", "dropout"], use_llm=False,
+        label="practice test",
+    )
+    at = _run("Practice Paper", practice={"exam": sweep, "answers": {}, "marks": {}})
+    _assert_clean(at, "Practice Paper")
+
+    questions = sweep["questions"]
+    assert questions, "the sweep produced nothing to answer"
+    assert at.radio, "closed-form questions must render as choices"
+
+    # answer the first question correctly
+    first = questions[0]
+    target = next(o for o in at.radio[0].options
+                  if o.startswith(first.correct_option))
+    at.radio[0].set_value(target)
+    at = at.run()
+    at = [b for b in at.button if b.label == "Submit answer"][0].click().run()
+    _assert_clean(at, "Practice Paper after answering")
+
+    marks = at.session_state["practice"]["marks"]
+    assert first.id in marks, "the answer was not marked"
+    assert marks[first.id].correct is True
+    assert any("Correct" in s.value for s in at.success), "no verdict was shown"
+
+
+def test_practice_paper_reports_a_total_and_can_be_retaken(clean_db) -> None:
+    from examagent.models.schemas import Evaluation
+    from examagent.services import mock_exam, progress
+
+    progress.mark_first_run_complete()
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca", "dropout"], use_llm=False,
+                                        label="practice submit")
+    questions = sweep["questions"]
+    state = {
+        "exam": sweep,
+        "answers": {q.id: q.correct_option for q in questions},
+        "marks": {q.id: Evaluation(score=10.0, correct=True) for q in questions},
+    }
+    at = _run("Practice Paper", practice=state)
+    at = [b for b in at.button if b.label == "Submit paper"][0].click().run()
+    _assert_clean(at, "Practice Paper report")
+
+    report = at.session_state["practice"]["report"]
+    assert report.percentage == 100.0
+    assert [b for b in at.button if b.label == "Take a fresh paper"], (
+        "the report must offer a retake"
     )

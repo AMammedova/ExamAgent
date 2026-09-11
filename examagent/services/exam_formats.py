@@ -15,8 +15,11 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from ..config import get_logger
 from ..models.schemas import AnswerOption, Category, Priority, Question, QuestionType
 from .assertion_engine import AR_BANK, ARItem
+
+log = get_logger(__name__)
 
 #: how many numbered statements a Section C item lists
 STATEMENTS_PER_ITEM = 4
@@ -322,3 +325,124 @@ def coverage() -> dict[str, int]:
         "multiple_choice": sum(1 for t in topics if build_multiple_choice(t, rng)),
         "multiple_response": sum(1 for t in topics if build_multiple_response(t, rng)),
     }
+
+
+# --------------------------------------------------------------- translation
+#: Bank statements are fixed English - that is what makes them exact, and it is
+#: also why a student studying in another language kept meeting English items
+#: among otherwise translated ones. Translating them keeps the exactness (the
+#: key comes from the truth flags, which translation never touches) and is
+#: cached per sentence, so the bank's ~174 statements are paid for once.
+_TRANSLATION_KV = "exam_formats_translation"
+
+_TRANSLATE_PROMPT = """Translate each numbered exam statement into {language}.
+
+Rules, in order of importance:
+- Preserve the meaning exactly. These are statements a student must mark true or
+  false, so a dropped negation, a softened "always"/"never", or a changed
+  quantifier turns a true statement false. Translate, never rephrase.
+- Keep technical names in English (Linear Regression, gradient descent, ReLU,
+  overfitting). Everything around them - verbs, connectives, qualifiers - is
+  {language}.
+- Same number of items, same order.
+
+{numbered}
+
+Return JSON exactly: {{"translations": ["...", "..."]}}"""
+
+
+def _translation_cache(language: str) -> dict[str, str]:
+    from ..models.db import kv_get, session_scope
+
+    with session_scope() as s:
+        stored = kv_get(s, f"{_TRANSLATION_KV}:{language}", {}) or {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def _store_translations(language: str, pairs: dict[str, str]) -> None:
+    from ..models.db import kv_get, kv_set, session_scope
+
+    with session_scope() as s:
+        key = f"{_TRANSLATION_KV}:{language}"
+        stored = kv_get(s, key, {}) or {}
+        if not isinstance(stored, dict):
+            stored = {}
+        stored.update(pairs)
+        kv_set(s, key, stored)
+
+
+def translate_all(texts: list[str], language: str) -> dict[str, str]:
+    """English -> `language` for a batch of statements, cached across calls."""
+    from .llm import get_llm
+
+    cache = _translation_cache(language)
+    missing = [t for t in dict.fromkeys(texts) if t and t not in cache]
+    if not missing:
+        return cache
+
+    llm = get_llm()
+    if not llm.available:
+        return cache
+
+    numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(missing, 1))
+    from .llm import LANGUAGE_NAMES
+
+    data, resp = llm.complete_json(
+        _TRANSLATE_PROMPT.format(
+            language=LANGUAGE_NAMES.get(language, language), numbered=numbered),
+        temperature=0.0,
+        max_tokens=min(3000, 120 * len(missing) + 200),
+    )
+    translations = (data or {}).get("translations") if isinstance(data, dict) else None
+    if not isinstance(translations, list) or len(translations) != len(missing):
+        # a partial or misaligned translation would attach the wrong sentence to
+        # the wrong key - keep the English rather than risk that
+        log.info("bank translation unusable (%s); keeping English",
+                 resp.error if resp else "shape mismatch")
+        return cache
+
+    fresh = {src: str(out).strip() for src, out in zip(missing, translations)
+             if str(out).strip()}
+    if fresh:
+        _store_translations(language, fresh)
+        cache.update(fresh)
+    return cache
+
+
+def localise(question: Question, use_llm: bool = True,
+             language: str | None = None) -> Question:
+    """Return the item with its text in the configured language.
+
+    Only the wording moves: the correct option, the truth flags behind it and
+    the option lettering are untouched, so a translation cannot mis-key an item
+    - at worst it reads awkwardly.
+    """
+    from ..config import get_settings
+
+    language = (language or get_settings().language or "en").strip().lower()
+    if language == "en" or not use_llm:
+        return question
+
+    fixed = {"True", "False"}
+    texts = [question.prompt, *question.statements,
+             *[o.text for o in question.options if o.text not in fixed]]
+    texts = [t for t in texts if t and t.strip()]
+    if not texts:
+        return question
+
+    try:
+        table = translate_all(texts, language)
+    except Exception as exc:  # translation is a nicety, never a blocker
+        log.warning("bank translation failed: %s", exc)
+        return question
+
+    def _t(text: str) -> str:
+        return table.get(text, text)
+
+    translated = question.model_copy(deep=True)
+    translated.prompt = _t(question.prompt)
+    translated.statements = [_t(s) for s in question.statements]
+    for option in translated.options:
+        if option.text not in fixed:
+            option.text = _t(option.text)
+    return translated

@@ -696,15 +696,22 @@ def _closed_question(topic_id: str, qtype: QuestionType, difficulty: int,
 
     retrieval = _retrieval(topic_id) if use_rag else None
     order = [qtype] + [t for t in EXAM_TYPES if t != qtype]
-    for candidate in order:
-        if use_llm:
+
+    if use_llm:
+        # Every LLM format before any bank one. The bank's statements are fixed
+        # English, so reaching for it to satisfy the *requested* format - when
+        # the LLM could have written a different format in the student's own
+        # language - is the wrong trade when a language is configured.
+        for candidate in order:
             q = _llm_closed_question(topic_id, candidate, difficulty, retrieval,
                                      avoid_prompts)
             if q is not None and q.id not in exclude_ids:
                 return q
+
+    for candidate in order:
         q = exam_formats.build(candidate, topic_id, rng, exclude_ids)
         if q is not None:
-            return q
+            return exam_formats.localise(q, use_llm=use_llm)
     return None
 
 

@@ -16,6 +16,7 @@ from examagent.ui import (
     learning_path,
     materials as materials_ui,
     mock,
+    practice,
     progress_page,
     quiz,
     settings_page,
@@ -32,6 +33,7 @@ PAGES = {
     "Study": study.render,
     "Quiz": quiz.render,
     "Mock Exam": mock.render,
+    "Practice Paper": practice.render,
     "Chat": chat.render,
     "Weaknesses": weaknesses.render,
     "Knowledge Map": knowledge_map.render,
@@ -42,8 +44,9 @@ PAGES = {
 
 PAGE_ICONS = {
     "Dashboard": "🎯", "Learning Path": "🧭", "Study": "📖", "Quiz": "✍️",
-    "Mock Exam": "⏱️", "Chat": "💬", "Weaknesses": "🔴", "Knowledge Map": "🗺️",
-    "Progress": "📈", "Materials": "📚", "Settings": "⚙️",
+    "Mock Exam": "⏱️", "Practice Paper": "📝", "Chat": "💬",
+    "Weaknesses": "🔴", "Knowledge Map": "🗺️", "Progress": "📈",
+    "Materials": "📚", "Settings": "⚙️",
 }
 
 
@@ -234,7 +237,7 @@ def main() -> None:
 
             st.code(traceback.format_exc())
         if st.button("Reset this page's state"):
-            for key in ("study", "quiz", "mock", "repair", "lp_active"):
+            for key in ("study", "quiz", "mock", "practice", "repair", "lp_active"):
                 st.session_state.pop(key, None)
             st.rerun()
 
