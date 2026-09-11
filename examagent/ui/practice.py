@@ -54,12 +54,40 @@ def _generate(state: dict[str, Any]) -> None:
         on_progress=tick,
     )
     bar.empty()
+    mock_exam.clear_progress()
     st.session_state[STATE] = {"exam": exam, "answers": {}, "marks": {}}
+    st.rerun()
+
+
+def _resume(saved: dict[str, Any]) -> None:
+    """Pick a saved paper back up. Only the answers were stored; the marks are
+    recomputed, which is exact for every format on this page."""
+    exam, answers = saved["exam"], saved["answers"]
+    by_id = {q.id: q for q in exam["questions"]}
+    marks = {qid: evaluate(by_id[qid], answer, use_llm=False)
+             for qid, answer in answers.items() if qid in by_id}
+    st.session_state[STATE] = {"exam": exam, "answers": answers, "marks": marks}
     st.rerun()
 
 
 def _render_intro(state: dict[str, Any]) -> None:
     llm_badge()
+
+    saved = mock_exam.load_progress()
+    if saved:
+        answered = len(saved["answers"])
+        total = len(saved["exam"]["questions"])
+        with st.container(border=True):
+            st.markdown(f"↩️ **You have a paper in progress** — {answered}/{total} "
+                        "answered.")
+            c1, c2 = st.columns(2)
+            if c1.button("Resume it", type="primary", use_container_width=True):
+                _resume(saved)
+            if c2.button("Discard and start fresh", use_container_width=True):
+                mock_exam.clear_progress()
+                st.rerun()
+        return
+
     with st.container(border=True):
         st.markdown("**One question on every topic in the syllabus**, in the three "
                     "formats the paper uses:")
@@ -67,7 +95,8 @@ def _render_intro(state: dict[str, Any]) -> None:
                     "- Multiple choice, single best answer — 3 marks\n"
                     "- Multiple response, all-or-nothing — 4 marks")
         st.caption("Building it takes a minute or so. You can answer in any order, and "
-                   "each answer is marked the moment you submit it.")
+                   "each answer is marked the moment you submit it. Your answers are "
+                   "saved as you go, so closing the app does not lose the paper.")
         if st.button("Build my practice paper", type="primary"):
             _generate(state)
 
@@ -92,6 +121,7 @@ def _render_paper(state: dict[str, Any]) -> None:
         _submit(state)
         return
     if c3.button("Start over", use_container_width=True):
+        mock_exam.clear_progress()
         st.session_state[STATE] = {}
         st.rerun()
 
@@ -114,6 +144,7 @@ def _render_paper(state: dict[str, Any]) -> None:
                     # every format here marks exactly, so this needs no LLM and
                     # comes back instantly
                     marks[q.id] = evaluate(q, answer, use_llm=False)
+                    mock_exam.save_progress(state["exam"]["exam_id"], state["answers"])
                     st.rerun()
         else:
             _verdict(q, already)
@@ -138,6 +169,7 @@ def _submit(state: dict[str, Any]) -> None:
     state["report"] = mock_exam.submit_exam(
         state["exam"]["exam_id"], answers, duration_seconds=0, use_llm=False,
     )
+    mock_exam.clear_progress()
     st.rerun()
 
 
@@ -186,6 +218,7 @@ def _render_report(state: dict[str, Any]) -> None:
     st.divider()
     c1, c2 = st.columns(2)
     if c1.button("Take a fresh paper", type="primary", use_container_width=True):
+        mock_exam.clear_progress()
         st.session_state[STATE] = {}
         _generate(_state())
     if c2.button("Back to my answers", use_container_width=True):

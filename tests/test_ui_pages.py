@@ -380,3 +380,48 @@ def test_practice_paper_reports_a_total_and_can_be_retaken(clean_db) -> None:
     assert [b for b in at.button if b.label == "Take a fresh paper"], (
         "the report must offer a retake"
     )
+
+
+def test_practice_paper_offers_to_resume_after_a_restart(clean_db) -> None:
+    """Simulates the restart the student asked about: the browser session is
+    gone, so session_state is empty, but the answers reached the database and
+    the page must offer the paper back rather than making her build a new one."""
+    from examagent.services import mock_exam, progress
+
+    progress.mark_first_run_complete()
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca", "dropout", "knn"],
+                                        use_llm=False, label="resume ui")
+    questions = sweep["questions"]
+    answered = {questions[0].id: questions[0].correct_option}
+    mock_exam.save_progress(sweep["exam_id"], answered)
+
+    # a fresh session: nothing carried over in memory
+    at = _run("Practice Paper")
+    _assert_clean(at, "Practice Paper after a restart")
+    text = " ".join(m.value for m in at.markdown)
+    assert "paper in progress" in text, "the saved paper was not offered"
+
+    at = [b for b in at.button if b.label == "Resume it"][0].click().run()
+    _assert_clean(at, "Practice Paper resumed")
+
+    state = at.session_state["practice"]
+    assert state["exam"]["exam_id"] == sweep["exam_id"]
+    assert state["answers"] == answered
+    assert state["marks"][questions[0].id].correct is True, (
+        "marks must be recomputed on resume, not lost"
+    )
+
+
+def test_practice_paper_can_discard_a_saved_paper(clean_db) -> None:
+    from examagent.services import mock_exam, progress
+
+    progress.mark_first_run_complete()
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca"], use_llm=False)
+    mock_exam.save_progress(sweep["exam_id"], {"x": "A"})
+
+    at = _run("Practice Paper")
+    at = [b for b in at.button
+          if b.label == "Discard and start fresh"][0].click().run()
+    _assert_clean(at, "Practice Paper after discarding")
+    assert mock_exam.load_progress() is None
+    assert any("Build my practice paper" == b.label for b in at.button)

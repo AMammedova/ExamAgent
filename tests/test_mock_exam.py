@@ -356,3 +356,55 @@ def test_a_sweep_is_persisted_and_can_be_submitted(clean_db) -> None:
     )
     assert report.percentage == 100.0
     assert report.max_score == sum(points_for(q.question_type) for q in questions)
+
+
+# ------------------------------------------------------- work in progress
+def test_no_saved_paper_on_a_clean_profile(clean_db) -> None:
+    assert mock_exam.load_progress() is None
+
+
+def test_an_unfinished_paper_survives_and_comes_back_whole(clean_db) -> None:
+    """The point of saving it: a refresh or an app restart must not throw away
+    a paper that took minutes to build and longer to answer."""
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca", "dropout"], use_llm=False,
+                                        label="resume test")
+    questions = sweep["questions"]
+    answers = {questions[0].id: questions[0].correct_option}
+    mock_exam.save_progress(sweep["exam_id"], answers)
+
+    # nothing in memory survives a restart - only what reached the database
+    saved = mock_exam.load_progress()
+    assert saved is not None
+    assert saved["answers"] == answers
+    assert [q.id for q in saved["exam"]["questions"]] == [q.id for q in questions]
+
+
+def test_saving_again_replaces_the_previous_answers(clean_db) -> None:
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca"], use_llm=False)
+    first, second = {"a": "A"}, {"a": "A", "b": "B"}
+    mock_exam.save_progress(sweep["exam_id"], first)
+    mock_exam.save_progress(sweep["exam_id"], second)
+    assert mock_exam.load_progress()["answers"] == second
+
+
+def test_a_submitted_paper_is_no_longer_in_progress(clean_db) -> None:
+    """Resuming a finished paper would put the student back into a paper they
+    have already been marked on."""
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca", "dropout"], use_llm=False)
+    questions = sweep["questions"]
+    mock_exam.save_progress(sweep["exam_id"], {q.id: q.correct_option for q in questions})
+    mock_exam.submit_exam(sweep["exam_id"], {q.id: q.correct_option for q in questions},
+                          duration_seconds=0, use_llm=False)
+    assert mock_exam.load_progress() is None
+
+
+def test_clear_progress_forgets_the_paper(clean_db) -> None:
+    sweep = mock_exam.build_topic_sweep(topic_ids=["pca"], use_llm=False)
+    mock_exam.save_progress(sweep["exam_id"], {"a": "A"})
+    mock_exam.clear_progress()
+    assert mock_exam.load_progress() is None
+
+
+def test_progress_pointing_at_a_deleted_exam_is_dropped(clean_db) -> None:
+    mock_exam.save_progress(999999, {"a": "A"})
+    assert mock_exam.load_progress() is None

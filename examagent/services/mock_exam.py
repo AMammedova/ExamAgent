@@ -12,7 +12,14 @@ from datetime import datetime
 from typing import Any, Callable
 
 from ..config import get_logger
-from ..models.db import MockExam, Topic, all_topics, session_scope
+from ..models.db import (
+    MockExam,
+    Topic,
+    all_topics,
+    kv_get,
+    kv_set,
+    session_scope,
+)
 from ..models.schemas import (
     DIMENSIONS,
     Category,
@@ -382,6 +389,40 @@ def load_exam(exam_id: int) -> dict[str, Any] | None:
             "answers": json.loads(exam.answers_json or "{}"),
             "report": json.loads(exam.report_json or "{}"),
         }
+
+
+# ------------------------------------------------------- work in progress
+#: Where an unfinished practice paper lives. Only the exam id and the answers
+#: are kept: every format on such a paper marks exactly, so the ticks and
+#: crosses are recomputed on resume rather than stored and kept in sync.
+PROGRESS_KV = "exam_in_progress"
+
+
+def save_progress(exam_id: int, answers: dict[str, Any]) -> None:
+    """Remember an unfinished paper, so a refresh or a restart does not throw
+    away work that took minutes to generate and longer to answer."""
+    with session_scope() as s:
+        kv_set(s, PROGRESS_KV, {"exam_id": int(exam_id), "answers": answers})
+
+
+def load_progress() -> dict[str, Any] | None:
+    """The unfinished paper, rehydrated - or None if there is none, it was
+    already submitted, or its questions have since been deleted."""
+    with session_scope() as s:
+        saved = kv_get(s, PROGRESS_KV, None)
+    if not isinstance(saved, dict) or not saved.get("exam_id"):
+        return None
+
+    exam = load_exam(int(saved["exam_id"]))
+    if exam is None or exam.get("completed"):
+        clear_progress()
+        return None
+    return {"exam": exam, "answers": dict(saved.get("answers") or {})}
+
+
+def clear_progress() -> None:
+    with session_scope() as s:
+        kv_set(s, PROGRESS_KV, None)
 
 
 def submit_exam(
