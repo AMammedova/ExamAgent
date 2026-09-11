@@ -15,6 +15,7 @@ from examagent.ui import (
     knowledge_map,
     learning_path,
     materials as materials_ui,
+    memory_book,
     mock,
     practice,
     progress_page,
@@ -34,6 +35,7 @@ PAGES = {
     "Quiz": quiz.render,
     "Mock Exam": mock.render,
     "Practice Paper": practice.render,
+    "Yaddaş kitabçası": memory_book.render,
     "Chat": chat.render,
     "Weaknesses": weaknesses.render,
     "Knowledge Map": knowledge_map.render,
@@ -44,7 +46,7 @@ PAGES = {
 
 PAGE_ICONS = {
     "Dashboard": "🎯", "Learning Path": "🧭", "Study": "📖", "Quiz": "✍️",
-    "Mock Exam": "⏱️", "Practice Paper": "📝", "Chat": "💬",
+    "Mock Exam": "⏱️", "Practice Paper": "📝", "Yaddaş kitabçası": "📒", "Chat": "💬",
     "Weaknesses": "🔴", "Knowledge Map": "🗺️", "Progress": "📈",
     "Materials": "📚", "Settings": "⚙️",
 }

@@ -13,7 +13,8 @@ AppTest = streamlit_testing.AppTest
 
 APP = str((pathlib.Path(__file__).resolve().parent.parent / "app.py"))
 PAGES = ["Dashboard", "Learning Path", "Study", "Quiz", "Mock Exam",
-         "Practice Paper", "Chat", "Weaknesses", "Knowledge Map", "Progress",
+         "Practice Paper", "Yaddaş kitabçası", "Chat", "Weaknesses",
+         "Knowledge Map", "Progress",
          "Materials", "Settings"]
 
 
@@ -425,3 +426,33 @@ def test_practice_paper_can_discard_a_saved_paper(clean_db) -> None:
     _assert_clean(at, "Practice Paper after discarding")
     assert mock_exam.load_progress() is None
     assert any("Build my practice paper" == b.label for b in at.button)
+
+
+def test_memory_book_shows_numbered_points_and_searches(clean_db) -> None:
+    from examagent.services import progress
+
+    progress.mark_first_run_complete()
+    at = _run("Yaddaş kitabçası")
+    _assert_clean(at, "Yaddaş kitabçası")
+
+    text = " ".join(m.value for m in at.markdown)
+    assert "**1.**" in text, "points must be numbered"
+    assert any(marker in text for marker in ("ə", "ı", "ğ")), "must be in Azerbaijani"
+
+    # searching narrows to matching points
+    at.text_input[0].set_value("dropout")
+    at = at.run()
+    _assert_clean(at, "Yaddaş kitabçası search")
+    found = " ".join(m.value for m in at.markdown).lower()
+    assert "dropout" in found
+
+
+def test_memory_book_says_so_when_a_search_finds_nothing(clean_db) -> None:
+    from examagent.services import progress
+
+    progress.mark_first_run_complete()
+    at = _run("Yaddaş kitabçası")
+    at.text_input[0].set_value("zzzznothing")
+    at = at.run()
+    _assert_clean(at, "Yaddaş kitabçası empty search")
+    assert at.info, "an empty result must be stated, not shown as a blank page"
